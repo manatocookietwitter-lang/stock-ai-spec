@@ -12,6 +12,7 @@ from stock_ai.domain import (
     AccountBucket,
     AccountType,
     CashState,
+    MarketSnapshot,
     PortfolioProposal,
     PortfolioState,
     Position,
@@ -67,8 +68,8 @@ def test_same_symbol_can_exist_in_multiple_account_buckets() -> None:
             CashState(account_bucket_id="taxable", available_cash=Decimal("200000")),
         ),
         tax_states=(
-            TaxState(account_bucket_id="nisa"),
-            TaxState(account_bucket_id="taxable"),
+            TaxState(account_bucket_id="nisa", tax_year=2026),
+            TaxState(account_bucket_id="taxable", tax_year=2026),
         ),
     )
     assert set(state.position_map()) == {("7203", "nisa"), ("7203", "taxable")}
@@ -100,7 +101,7 @@ def test_duplicate_symbol_bucket_is_rejected() -> None:
             account_buckets=(bucket,),
             positions=(position, position),
             cash=(CashState(account_bucket_id="taxable", available_cash=Decimal("1")),),
-            tax_states=(TaxState(account_bucket_id="taxable"),),
+            tax_states=(TaxState(account_bucket_id="taxable", tax_year=2026),),
         )
 
 
@@ -121,6 +122,21 @@ def test_portfolio_proposal_cannot_be_order_instruction() -> None:
             model_bundle_version="m",
             decision_engine_version="e",
             cost_policy_id="c",
+            cost_policy_version="c-v1",
             tax_policy_id="t",
+            tax_policy_version="t-v1",
             is_order_instruction=True,
         )
+
+
+def test_market_snapshot_nested_price_mapping_is_immutable() -> None:
+    as_of = datetime(2026, 8, 24, 11, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
+    snapshot = MarketSnapshot(
+        snapshot_id="snapshot",
+        as_of=as_of,
+        available_at=as_of,
+        prices={"7203": Decimal("2500")},
+        source="fixture",
+    )
+    with pytest.raises(TypeError):
+        snapshot.prices["7203"] = Decimal("1")  # type: ignore[index]

@@ -16,6 +16,7 @@ from stock_ai.ml import (
     PurgedExpandingWindowSplitter,
     RidgeRegressor,
     build_supervised_dataset,
+    reserve_locked_final_holdout,
     walk_forward_validate,
     write_dataset_snapshot,
 )
@@ -42,14 +43,64 @@ def test_one_five_twenty_day_targets_are_forward_only() -> None:
     assert dataset.loc[0, "target_return_20d"] == pytest.approx(120 / 100 - 1)
     assert pd.isna(dataset.loc[24, "target_return_1d"])
     assert dataset.loc[0, "label_end_date_5d"] == dates[5]
+    assert dataset.loc[0, "label_available_at_5d"] == pd.Timestamp(frame.loc[5, "available_at"])
+
+
+def test_historical_snapshot_blanks_labels_not_available_at_cutoff(tmp_path: object) -> None:
+    from pathlib import Path
+
+    assert isinstance(tmp_path, Path)
+    dates = pd.bdate_range("2026-01-01", periods=25)
+    available = [
+        value.to_pydatetime().replace(tzinfo=ZoneInfo("Asia/Tokyo")) + timedelta(days=1, hours=8)
+        for value in dates
+    ]
+    frame = pd.DataFrame(
+        {
+            "symbol": ["A"] * 25,
+            "trading_date": dates,
+            "available_at": available,
+            "adjusted_close": np.arange(100.0, 125.0),
+        }
+    )
+    dataset = build_supervised_dataset(frame)
+    cutoff = available[10]
+    snapshot = write_dataset_snapshot(
+        dataset,
+        tmp_path,
+        manifest=V0_MANIFEST,
+        as_of=cutoff,
+        created_at=cutoff + timedelta(minutes=1),
+    )
+    saved = pd.read_parquet(snapshot.parquet_path)
+    assert pd.notna(saved.loc[0, "target_return_5d"])
+    assert pd.isna(saved.loc[0, "target_return_20d"])
+    assert pd.isna(saved.loc[0, "label_end_date_20d"])
+
+
+def test_targets_require_one_shared_trading_calendar() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["A", "A", "B"],
+            "trading_date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-01"]),
+            "available_at": [
+                "2026-01-02T08:00:00+09:00",
+                "2026-01-05T08:00:00+09:00",
+                "2026-01-02T08:00:00+09:00",
+            ],
+            "adjusted_close": [100.0, 101.0, 200.0],
+        }
+    )
+    with pytest.raises(ValueError, match="suspension/delisting policy"):
+        build_supervised_dataset(frame)
 
 
 def test_snapshot_is_deterministic_and_immutable(tmp_path: object) -> None:
     from pathlib import Path
 
     assert isinstance(tmp_path, Path)
-    daily, market, financials = market_fixture(periods=80)
-    features = FeatureEngine(V0_MANIFEST).transform(daily, market, financials=financials)
+    daily, market, sectors, financials = market_fixture(periods=80)
+    features = FeatureEngine(V0_MANIFEST).transform(daily, market, sectors, financials=financials)
     dataset = build_supervised_dataset(features)
     as_of = datetime(2026, 8, 24, 11, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
     created = datetime(2026, 8, 24, 11, 31, tzinfo=ZoneInfo("Asia/Tokyo"))
@@ -76,13 +127,14 @@ def test_purged_expanding_split_has_gap_and_no_overlapping_labels() -> None:
         validation_periods=3,
         step_periods=3,
         purge_periods=2,
-        embargo_periods=1,
+        embargo_periods=3,
+        label_horizon_periods=3,
     )
     folds = tuple(splitter.split(frame, label_end_column="label_end"))
     assert len(folds) >= 2
     for fold in folds:
-        train = frame.iloc[fold.train_indices]
-        validation = frame.iloc[fold.validation_indices]
+        train = frame.iloc[list(fold.train_indices)]
+        validation = frame.iloc[list(fold.validation_indices)]
         assert train["label_end"].max() < validation["trading_date"].min()
         assert train["trading_date"].max() < validation["trading_date"].min()
     assert len(folds[1].train_indices) > len(folds[0].train_indices)
@@ -116,7 +168,8 @@ def test_momentum_and_ridge_baselines_and_walk_forward_are_deterministic() -> No
         initial_train_periods=30,
         validation_periods=10,
         purge_periods=1,
-        embargo_periods=1,
+        embargo_periods=2,
+        label_horizon_periods=2,
     )
     first = walk_forward_validate(
         frame,
@@ -136,3 +189,89 @@ def test_momentum_and_ridge_baselines_and_walk_forward_are_deterministic() -> No
     )
     assert first == second
     assert len(first) >= 3
+
+
+def test_rank_ic_is_computed_cross_sectionally_per_date() -> None:
+    dates = pd.bdate_range("2026-01-01", periods=12)
+    rows = [
+        {
+            "symbol": symbol,
+            "trading_date": date,
+            "feature": float(rank),
+            "target": float(rank),
+            "label_end": dates[min(date_index + 1, len(dates) - 1)],
+        }
+        for date_index, date in enumerate(dates)
+        for rank, symbol in enumerate(("A", "B", "C"), start=1)
+    ]
+    frame = pd.DataFrame(rows)
+    splitter = PurgedExpandingWindowSplitter(
+        initial_train_periods=5,
+        validation_periods=3,
+        embargo_periods=1,
+        label_horizon_periods=1,
+    )
+    metrics = walk_forward_validate(
+        frame,
+        feature_names=("feature",),
+        target_column="target",
+        label_end_column="label_end",
+        splitter=splitter,
+        model_factory=lambda: RidgeRegressor(alpha=0.01),
+    )
+    assert metrics[0].spearman_rank_ic == pytest.approx(1.0)
+    assert metrics[0].rank_ic_dates == 3
+
+
+def test_locked_holdout_boundary_is_excluded_from_development() -> None:
+    dates = pd.bdate_range("2026-01-01", periods=20)
+    frame = pd.DataFrame({"trading_date": dates})
+    locked = reserve_locked_final_holdout(frame, holdout_periods=5)
+    development = frame.iloc[list(locked.development_indices)]
+    assert development["trading_date"].max() < locked.holdout_start
+    assert locked.holdout_start == dates[-5]
+
+
+def test_embargo_cannot_be_shorter_than_label_horizon() -> None:
+    with pytest.raises(ValueError, match="at least the label horizon"):
+        PurgedExpandingWindowSplitter(
+            initial_train_periods=10,
+            validation_periods=2,
+            embargo_periods=4,
+            label_horizon_periods=5,
+        )
+    with pytest.raises(ValueError, match="step periods must be positive"):
+        PurgedExpandingWindowSplitter(
+            initial_train_periods=10,
+            validation_periods=2,
+            step_periods=-1,
+            embargo_periods=1,
+            label_horizon_periods=1,
+        )
+
+
+def test_walk_forward_fails_closed_when_no_fold_is_usable() -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    frame = pd.DataFrame(
+        {
+            "trading_date": dates,
+            "feature": np.arange(5, dtype=float),
+            "target": np.nan,
+            "label_end": dates,
+        }
+    )
+    splitter = PurgedExpandingWindowSplitter(
+        initial_train_periods=3,
+        validation_periods=2,
+        embargo_periods=1,
+        label_horizon_periods=1,
+    )
+    with pytest.raises(ValueError, match="BLOCKED_BY_VALIDATION"):
+        walk_forward_validate(
+            frame,
+            feature_names=("feature",),
+            target_column="target",
+            label_end_column="label_end",
+            splitter=splitter,
+            model_factory=lambda: RidgeRegressor(),
+        )

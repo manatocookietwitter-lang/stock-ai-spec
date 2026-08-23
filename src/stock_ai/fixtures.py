@@ -27,7 +27,9 @@ from stock_ai.domain import (
 JST = ZoneInfo("Asia/Tokyo")
 
 
-def market_fixture(periods: int = 340) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def market_fixture(
+    periods: int = 340,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     dates = pd.bdate_range("2024-01-04", periods=periods)
     definitions = (
         ("7203", "Transport Equipment", 2400.0, 0.85, 26.0, 1_500_000.0),
@@ -57,25 +59,40 @@ def market_fixture(periods: int = 340) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
                     "adjusted_high": high,
                     "adjusted_low": low,
                     "adjusted_close": close,
+                    "close": close,
                     "adjusted_volume": float(volume),
                     "trading_value": close * volume,
                     "shares_outstanding": shares * 1_000,
                 }
             )
     daily = pd.DataFrame(rows)
+    daily["__return_1d"] = daily.groupby("symbol", sort=False)["adjusted_close"].pct_change(
+        fill_method=None
+    )
 
     market_rows: list[dict[str, object]] = []
     for index, trading_date in enumerate(dates):
         topix_close = 2250 + 0.65 * index + 17 * np.sin(index / 19)
+        date_returns = daily.loc[daily["trading_date"] == trading_date, "__return_1d"]
         market_rows.append(
             {
                 "trading_date": trading_date,
                 "available_at": trading_date.to_pydatetime().replace(tzinfo=JST)
                 + timedelta(days=1, hours=8),
                 "topix_close": topix_close,
+                "advancing_issues": int((date_returns > 0).sum()),
+                "declining_issues": int((date_returns < 0).sum()),
             }
         )
     market = pd.DataFrame(market_rows)
+
+    sector_context = (
+        daily.groupby(["sector", "trading_date"], as_index=False, observed=True)
+        .agg(sector_return_1d=("__return_1d", "mean"), available_at=("available_at", "max"))
+        .sort_values(["sector", "trading_date"])
+        .reset_index(drop=True)
+    )
+    daily = daily.drop(columns="__return_1d")
 
     financial_rows: list[dict[str, object]] = []
     for index, (symbol, _, _, _, _, _) in enumerate(definitions):
@@ -96,7 +113,7 @@ def market_fixture(periods: int = 340) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
                     "forecast_revision": -0.01 + index * 0.01 + revision * 0.012,
                 }
             )
-    return daily, market, pd.DataFrame(financial_rows)
+    return daily, market, sector_context, pd.DataFrame(financial_rows)
 
 
 def portfolio_fixture(as_of: datetime, latest_prices: dict[str, Decimal]) -> PortfolioState:
@@ -152,11 +169,12 @@ def portfolio_fixture(as_of: datetime, latest_prices: dict[str, Decimal]) -> Por
         tax_states=(
             TaxState(
                 account_bucket_id=taxable.bucket_id,
+                tax_year=as_of.year,
                 realized_gain_ytd=Decimal("80000"),
                 realized_loss_ytd=Decimal("15000"),
                 loss_carryforward_user_input=Decimal("0"),
             ),
-            TaxState(account_bucket_id=nisa.bucket_id),
+            TaxState(account_bucket_id=nisa.bucket_id, tax_year=as_of.year),
         ),
     )
 

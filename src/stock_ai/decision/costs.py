@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from stock_ai.domain import TransactionCostEstimate
 
@@ -19,9 +19,19 @@ class CostPolicy(BaseModel):
     commission_fixed: Decimal = Field(default=Decimal("0"), ge=0)
     commission_bps: Decimal = Field(default=Decimal("0"), ge=0)
     minimum_commission: Decimal = Field(default=Decimal("0"), ge=0)
+    zero_commission_confirmed: bool = False
     full_spread_bps: Decimal = Field(default=Decimal("10"), ge=0)
     slippage_bps: Decimal = Field(default=Decimal("5"), ge=0)
     impact_bps_at_full_adv: Decimal = Field(default=Decimal("25"), ge=0)
+
+    @model_validator(mode="after")
+    def zero_commission_must_be_explicit(self) -> CostPolicy:
+        is_zero = (
+            self.commission_fixed == 0 and self.commission_bps == 0 and self.minimum_commission == 0
+        )
+        if is_zero and not self.zero_commission_confirmed:
+            raise ValueError("zero commission requires an explicit confirmed policy")
+        return self
 
 
 class TransactionCostEngine:

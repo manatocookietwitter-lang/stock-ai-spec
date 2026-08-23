@@ -116,10 +116,10 @@ uv run --no-sync stock-ai fixture-demo
 `fixture-demo` は明示的な決定的fixtureだけを使い、次を一巡する。
 
 ```text
-fixture OHLCV / 財務 / TOPIX
-→ Point-in-time FeatureSet V1 Core（54特徴）
-→ 1日・5日・20日ラベル
-→ Ridge baselineとpurged expanding validation
+fixture OHLCV / 財務 / TOPIX / sector / breadth
+→ Point-in-time FeatureSet V1 Core（58特徴）
+→ 1日・5日・20日ラベル（Goal 1では調整後終値間リターンの研究proxy）
+→ Ridge baseline、purged expanding validation、未使用locked holdout
 → 現在保有・現金・口座別状態
 → 取引コストと推定税影響
 → Daily Portfolio Decision Engine
@@ -129,6 +129,10 @@ fixture OHLCV / 財務 / TOPIX
 ```
 
 fixture は実データ欠損時の本番fallbackではなく、正しさと再現性の検証専用である。CLIも実注文を送信しない。
+
+Feature Engineは候補銘柄集合からsector値やbreadthを再計算しない。明示的なpoint-in-time
+sector contextとmarket breadthを入力し、必要capabilityが欠ける場合は
+`BLOCKED_BY_DATA_CAPABILITY`としてfail closedする。
 
 ## 現在のパッケージ構成
 

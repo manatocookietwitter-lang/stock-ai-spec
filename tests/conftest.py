@@ -65,7 +65,7 @@ def account_components(
         account,
         bucket,
         CashState(account_bucket_id=bucket.bucket_id, available_cash=cash),
-        TaxState(account_bucket_id=bucket.bucket_id),
+        TaxState(account_bucket_id=bucket.bucket_id, tax_year=AS_OF.year),
     )
 
 
@@ -122,6 +122,7 @@ def decision_engine(
             or CostPolicy(
                 policy_id="cost-v1",
                 version="cost-v1",
+                zero_commission_confirmed=True,
                 full_spread_bps=Decimal("0"),
                 slippage_bps=Decimal("0"),
                 impact_bps_at_full_adv=Decimal("0"),

@@ -22,6 +22,9 @@ def normalize_available_at(frame: pd.DataFrame, column: str = "available_at") ->
     if column not in frame:
         raise DataAvailabilityError(f"missing required availability column: {column}")
     normalized = frame.copy()
+    for value in normalized[column].dropna():
+        if pd.Timestamp(value).tzinfo is None:
+            raise DataAvailabilityError(f"{column} timestamps must be timezone-aware")
     normalized[column] = pd.to_datetime(normalized[column], utc=True, errors="raise")
     if normalized[column].isna().any():
         raise DataAvailabilityError(f"{column} cannot contain missing timestamps")
@@ -48,7 +51,12 @@ def assert_point_in_time(
     if as_of_column not in frame:
         raise DataAvailabilityError(f"missing required as-of column: {as_of_column}")
     normalized = normalize_available_at(frame, available_at_column)
+    for value in normalized[as_of_column].dropna():
+        if pd.Timestamp(value).tzinfo is None:
+            raise DataAvailabilityError(f"{as_of_column} timestamps must be timezone-aware")
     as_of = pd.to_datetime(normalized[as_of_column], utc=True, errors="raise")
+    if as_of.isna().any():
+        raise DataAvailabilityError(f"{as_of_column} cannot contain missing timestamps")
     invalid = normalized[available_at_column] > as_of
     if invalid.any():
         examples = normalized.loc[invalid, [available_at_column, as_of_column]].head(3)

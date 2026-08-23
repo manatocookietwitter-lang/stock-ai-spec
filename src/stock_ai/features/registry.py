@@ -4,15 +4,53 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+import os
+import subprocess
+from collections.abc import Iterable, Mapping
+from datetime import datetime
+from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 def _stable_hash(payload: Any) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _source_revision() -> str:
+    configured = os.environ.get("STOCK_AI_CODE_COMMIT")
+    if configured:
+        return configured
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        revision = completed.stdout.strip()
+        dirty = subprocess.run(
+            ["git", "diff", "--quiet"],
+            cwd=Path(__file__).resolve().parent,
+            check=False,
+            capture_output=True,
+            timeout=2,
+        ).returncode
+        return f"{revision}-dirty" if dirty else revision
+    except (OSError, subprocess.SubprocessError):
+        return "UNSET"
 
 
 class FeatureDefinition(BaseModel):
@@ -23,7 +61,7 @@ class FeatureDefinition(BaseModel):
     version: int = Field(ge=1)
     stage: str = Field(pattern=r"^v[01](_core)?$")
     inputs: tuple[str, ...]
-    parameters: dict[str, int | float | str]
+    parameters: Mapping[str, int | float | str]
     formula: str = Field(min_length=1)
     implementation: str = "stock_ai.features.engine@0.1.0"
     warmup_period: int = Field(ge=0)
@@ -31,6 +69,19 @@ class FeatureDefinition(BaseModel):
     normalization: tuple[str, ...] = ("raw",)
     availability_rule: str = "completed_daily_bar_only"
     required_capabilities: tuple[str, ...] = ("daily_adjusted_ohlcv",)
+
+    @field_validator("parameters", mode="after")
+    @classmethod
+    def freeze_parameters(
+        cls, value: Mapping[str, int | float | str]
+    ) -> Mapping[str, int | float | str]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("parameters")
+    def serialize_parameters(
+        self, value: Mapping[str, int | float | str]
+    ) -> dict[str, int | float | str]:
+        return dict(value)
 
     @property
     def definition_hash(self) -> str:
@@ -43,8 +94,10 @@ class FeatureSetManifest(BaseModel):
     feature_set_id: str = Field(min_length=1)
     feature_set_version: str = Field(min_length=1)
     feature_names: tuple[str, ...]
-    feature_definition_hashes: dict[str, str]
+    feature_definition_hashes: Mapping[str, str]
     preprocessing_version: str = "raw-v1"
+    created_at: datetime = datetime.fromisoformat("2026-08-24T00:00:00+00:00")
+    code_commit: str = Field(default_factory=_source_revision)
     required_capabilities: tuple[str, ...]
     training_only_fit_rules: tuple[str, ...] = (
         "imputation_fit_on_training_fold_only",
@@ -52,8 +105,19 @@ class FeatureSetManifest(BaseModel):
         "feature_selection_fit_on_training_fold_only",
     )
 
+    @field_validator("feature_definition_hashes", mode="after")
+    @classmethod
+    def freeze_definition_hashes(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("feature_definition_hashes")
+    def serialize_definition_hashes(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
+
     @model_validator(mode="after")
     def hashes_match_features(self) -> Self:
+        if len(self.feature_names) != len(set(self.feature_names)):
+            raise ValueError("manifest feature names must be unique")
         if set(self.feature_names) != set(self.feature_definition_hashes):
             raise ValueError("every manifest feature must have exactly one definition hash")
         return self
@@ -97,4 +161,5 @@ class FeatureRegistry:
             feature_names=selected_names,
             feature_definition_hashes={item.name: item.definition_hash for item in definitions},
             required_capabilities=capabilities,
+            code_commit=_source_revision(),
         )

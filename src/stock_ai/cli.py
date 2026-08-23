@@ -38,6 +38,7 @@ from stock_ai.ml import (
     PurgedExpandingWindowSplitter,
     RidgeRegressor,
     build_supervised_dataset,
+    reserve_locked_final_holdout,
     walk_forward_validate,
     write_dataset_snapshot,
 )
@@ -69,8 +70,10 @@ def fixture_demo(
     ] = False,
 ) -> None:
     """Run fixture -> features -> Ridge -> costs/tax -> proposal -> next state."""
-    daily, market, financials = market_fixture()
-    features = FeatureEngine(V1_CORE_MANIFEST).transform(daily, market, financials=financials)
+    daily, market, sectors, financials = market_fixture()
+    features = FeatureEngine(V1_CORE_MANIFEST).transform(
+        daily, market, sectors, financials=financials
+    )
     dataset = build_supervised_dataset(features)
     last_date = pd.Timestamp(features["trading_date"].max())
     as_of = next_business_morning(last_date)
@@ -83,7 +86,9 @@ def fixture_demo(
     )
 
     feature_names = V1_CORE_MANIFEST.feature_names
-    training = dataset.loc[dataset["trading_date"] < last_date].copy()
+    locked_holdout = reserve_locked_final_holdout(dataset, holdout_periods=20)
+    development = dataset.iloc[list(locked_holdout.development_indices)].copy()
+    training = development.copy()
     bundle = BaselinePredictionBundle(feature_names, alpha=5.0).fit(training)
     latest = features.loc[features["trading_date"] == last_date].copy()
     predicted = bundle.predict(latest).set_index("symbol")
@@ -93,9 +98,10 @@ def fixture_demo(
         step_periods=30,
         purge_periods=5,
         embargo_periods=5,
+        label_horizon_periods=5,
     )
     validation = walk_forward_validate(
-        dataset.dropna(subset=["target_return_5d"]),
+        development.dropna(subset=["target_return_5d"]),
         feature_names=feature_names,
         target_column="target_return_5d",
         label_end_column="label_end_date_5d",
@@ -106,7 +112,7 @@ def fixture_demo(
     price_lookup: dict[str, Decimal] = {}
     for _, latest_row in latest.iterrows():
         latest_symbol = str(latest_row["symbol"])
-        price_lookup[latest_symbol] = _decimal(cast(float, latest_row["adjusted_close"]))
+        price_lookup[latest_symbol] = _decimal(cast(float, latest_row["close"]))
     portfolio = portfolio_fixture(as_of, price_lookup)
     security_data = {
         "7203": ("Toyota", "Transport Equipment"),
@@ -237,11 +243,18 @@ def fixture_demo(
     if json_output:
         typer.echo(proposal.model_dump_json(indent=2))
         return
-    typer.echo("DETERMINISTIC FIXTURE ONLY — never production fallback, never an order")
+    typer.echo("DETERMINISTIC FIXTURE ONLY - never production fallback, never an order")
     typer.echo(
         f"snapshot={snapshot.snapshot_id[:12]} features={len(feature_names)} "
-        f"rows={snapshot.rows} validation_folds={len(validation)}"
+        f"rows={snapshot.rows} validation_folds={len(validation)} "
+        f"locked_holdout_start={locked_holdout.holdout_start.date()}"
     )
+    typer.echo("baseline predictions (fixture research proxy): symbol p1d p5d p20d")
+    for symbol_value, row in predicted.sort_index().iterrows():
+        typer.echo(
+            f"{symbol_value} {row['prediction_1d']:.6f} "
+            f"{row['prediction_5d']:.6f} {row['prediction_20d']:.6f}"
+        )
     typer.echo("symbol bucket current recommended action cost tax")
     for line in proposal.lines:
         typer.echo(

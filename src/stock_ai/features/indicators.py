@@ -21,6 +21,22 @@ def cross_flags(short: pd.Series, long: pd.Series) -> tuple[pd.Series, pd.Series
     return golden, dead
 
 
+def days_since_event(flag: pd.Series) -> pd.Series:
+    """Trading-row count since the most recent true event; missing before the first."""
+    result = np.full(len(flag), np.nan, dtype=float)
+    elapsed: int | None = None
+    for position, value in enumerate(flag.to_numpy(dtype=float)):
+        if pd.isna(value):
+            continue
+        if value == 1:
+            elapsed = 0
+        elif elapsed is not None:
+            elapsed += 1
+        if elapsed is not None:
+            result[position] = float(elapsed)
+    return pd.Series(result, index=flag.index, dtype=float)
+
+
 def macd(
     close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -80,7 +96,10 @@ def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     components = pd.concat(
         [high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1
     )
-    return components.max(axis=1, skipna=True)
+    result = components.max(axis=1, skipna=True)
+    if not result.empty:
+        result.iloc[0] = np.nan
+    return result
 
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from stock_ai.decision import (
     CostPolicy,
     DailyPortfolioDecisionEngine,
@@ -45,7 +47,7 @@ def test_insufficient_cash_results_in_skip() -> None:
         portfolio=state,
         candidates=(candidate("B", 0.20),),
         generated_at=AS_OF,
-        model_bundle_version="test",
+        model_bundle_version="test-model-v1",
     )
     assert proposal.lines[0].action is ProposalAction.SKIP
     assert proposal.lines[0].recommended_shares == 0
@@ -57,7 +59,7 @@ def test_target_is_rounded_to_100_share_lots_without_exceeding_cash() -> None:
         portfolio=state,
         candidates=(candidate("B", 0.20),),
         generated_at=AS_OF,
-        model_bundle_version="test",
+        model_bundle_version="test-model-v1",
     )
     line = proposal.lines[0]
     assert line.action is ProposalAction.BUY
@@ -78,7 +80,7 @@ def test_negative_holding_can_be_sold_to_all_cash() -> None:
         portfolio=portfolio((held,), cash=Decimal("0")),
         candidates=(candidate("A", -0.10),),
         generated_at=AS_OF,
-        model_bundle_version="test",
+        model_bundle_version="test-model-v1",
     )
     assert proposal.lines[0].action is ProposalAction.SELL
     assert proposal.estimated_cash_after["bucket"] == Decimal("100000")
@@ -107,7 +109,7 @@ def test_tax_offset_curve_can_produce_reduce_not_sell() -> None:
         portfolio=state,
         candidates=(candidate("A", -0.01),),
         generated_at=AS_OF,
-        model_bundle_version="test",
+        model_bundle_version="test-model-v1",
     )
     assert proposal.lines[0].action is ProposalAction.REDUCE
     assert proposal.lines[0].recommended_shares == 200
@@ -134,7 +136,7 @@ def test_higher_ranked_replacement_is_rejected_after_cost_and_tax() -> None:
         portfolio=portfolio((held,), cash=Decimal("0")),
         candidates=(candidate("A", 0.01), candidate("B", 0.08)),
         generated_at=AS_OF,
-        model_bundle_version="test",
+        model_bundle_version="test-model-v1",
     )
     by_symbol = {line.symbol: line for line in proposal.lines}
     assert by_symbol["A"].action is ProposalAction.HOLD
@@ -154,7 +156,7 @@ def test_lower_ranked_current_holding_remains_hold_when_gain_is_too_small() -> N
         portfolio=portfolio((held,), cash=Decimal("0")),
         candidates=(candidate("A", 0.010), candidate("B", 0.011)),
         generated_at=AS_OF,
-        model_bundle_version="test",
+        model_bundle_version="test-model-v1",
     )
     by_symbol = {line.symbol: line for line in proposal.lines}
     assert by_symbol["A"].action is ProposalAction.HOLD
@@ -199,12 +201,16 @@ def test_same_symbol_in_taxable_and_nisa_gets_separate_lines() -> None:
             CashState(account_bucket_id="taxable", available_cash=Decimal("0")),
             CashState(account_bucket_id="nisa", available_cash=Decimal("0")),
         ),
-        tax_states=(TaxState(account_bucket_id="taxable"), TaxState(account_bucket_id="nisa")),
+        tax_states=(
+            TaxState(account_bucket_id="taxable", tax_year=2026),
+            TaxState(account_bucket_id="nisa", tax_year=2026),
+        ),
     )
     cost = TransactionCostEngine(
         CostPolicy(
             policy_id="cost-v1",
             version="cost-v1",
+            zero_commission_confirmed=True,
             full_spread_bps=Decimal("0"),
             slippage_bps=Decimal("0"),
             impact_bps_at_full_adv=Decimal("0"),
@@ -237,10 +243,81 @@ def test_same_symbol_in_taxable_and_nisa_gets_separate_lines() -> None:
             candidate("7203", 0.0, bucket="nisa"),
         ),
         generated_at=AS_OF,
-        model_bundle_version="test",
+        model_bundle_version="test-model-v1",
     )
     assert {(line.symbol, line.account_bucket_id) for line in proposal.lines} == {
         ("7203", "taxable"),
         ("7203", "nisa"),
     }
     assert all(line.action is ProposalAction.HOLD for line in proposal.lines)
+
+
+def test_existing_odd_lot_only_allows_round_lot_trade_deltas() -> None:
+    held = Position(
+        symbol="A",
+        account_bucket_id="bucket",
+        shares=150,
+        average_acquisition_price=Decimal("1000"),
+        market_price=Decimal("1000"),
+    )
+    proposal = decision_engine().propose(
+        portfolio=portfolio((held,), cash=Decimal("0")),
+        candidates=(candidate("A", -0.10),),
+        generated_at=AS_OF,
+        model_bundle_version="test-model-v1",
+    )
+    line = proposal.lines[0]
+    assert abs(line.share_difference) % 100 == 0
+    assert line.recommended_shares == 50
+    assert line.action is ProposalAction.REDUCE
+
+
+def test_candidate_order_does_not_change_proposal_or_identity() -> None:
+    state = portfolio(cash=Decimal("200000"))
+    candidates = (candidate("B", 0.10), candidate("A", 0.10))
+    engine = decision_engine()
+    first = engine.propose(
+        portfolio=state,
+        candidates=candidates,
+        generated_at=AS_OF,
+        model_bundle_version="test-model-v1",
+    )
+    second = engine.propose(
+        portfolio=state,
+        candidates=tuple(reversed(candidates)),
+        generated_at=AS_OF,
+        model_bundle_version="test-model-v1",
+    )
+    assert first.targets == second.targets
+    assert first.proposal_id == second.proposal_id
+
+
+def test_mixed_prediction_provenance_is_rejected() -> None:
+    first = candidate("A", 0.10)
+    second = candidate("B", 0.10)
+    second = second.model_copy(
+        update={
+            "prediction": second.prediction.model_copy(
+                update={"data_snapshot_id": "different-snapshot"}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="coherent prediction bundle"):
+        decision_engine().propose(
+            portfolio=portfolio(cash=Decimal("200000")),
+            candidates=(first, second),
+            generated_at=AS_OF,
+            model_bundle_version="test-model-v1",
+        )
+
+
+def test_all_cash_empty_universe_can_propose_no_trades() -> None:
+    proposal = decision_engine().propose(
+        portfolio=portfolio(cash=Decimal("200000")),
+        candidates=(),
+        generated_at=AS_OF,
+        model_bundle_version="empty-universe-v1",
+    )
+    assert proposal.lines == ()
+    assert proposal.targets == ()
+    assert proposal.net_improvement == 0

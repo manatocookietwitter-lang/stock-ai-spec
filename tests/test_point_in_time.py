@@ -30,6 +30,13 @@ def test_naive_as_of_is_rejected() -> None:
         point_in_time_view(frame, datetime(2026, 8, 24, 11, 30))
 
 
+def test_naive_row_timestamp_is_rejected_instead_of_assumed_utc() -> None:
+    frame = pd.DataFrame({"available_at": ["2026-08-24 01:00:00"]})
+    as_of = datetime(2026, 8, 24, 11, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
+    with pytest.raises(DataAvailabilityError, match="timestamps must be timezone-aware"):
+        point_in_time_view(frame, as_of)
+
+
 def test_assert_point_in_time_detects_future_information() -> None:
     frame = pd.DataFrame(
         {

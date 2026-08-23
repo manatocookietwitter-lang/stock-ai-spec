@@ -10,6 +10,7 @@ from stock_ai.features.indicators import (
     atr,
     bollinger,
     cross_flags,
+    days_since_event,
     directional_movement,
     ema,
     macd,
@@ -67,6 +68,10 @@ def test_atr_natr_adx_and_di_known_trend() -> None:
     assert plus_di.iloc[-1] == pytest.approx(50.0)
     assert minus_di.iloc[-1] == pytest.approx(0.0)
     assert adx.iloc[-1] == pytest.approx(100.0)
+    assert average_true_range.first_valid_index() == 14
+    assert plus_di.first_valid_index() == 14
+    assert minus_di.first_valid_index() == 14
+    assert adx.first_valid_index() == 27
 
 
 def test_obv_and_mfi_known_values() -> None:
@@ -85,3 +90,6 @@ def test_cross_boundary_and_warmup() -> None:
     assert golden.iloc[2] == 1.0
     assert dead.iloc[3] == 1.0
     assert golden.iloc[1] == 0.0
+    elapsed = days_since_event(golden)
+    assert pd.isna(elapsed.iloc[1])
+    assert elapsed.iloc[2:].tolist() == [0.0, 1.0]

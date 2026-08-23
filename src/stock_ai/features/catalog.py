@@ -1,6 +1,6 @@
 """Goal 1 FeatureSet V0 and V1 Core definitions.
 
-The manifest intentionally enables 54 candidates.  Indicators remain model
+The manifest intentionally enables 58 candidates.  Indicators remain model
 inputs; none of the definitions emit BUY/SELL actions.
 """
 
@@ -187,6 +187,22 @@ V1_ADDITIONAL_DEFINITIONS = (
         parameters={"short": 20, "long": 60},
         unit="flag",
     ),
+    _feature(
+        "trend.sma_days_since_gc_20_60",
+        "moving_average_cross",
+        "trading rows since latest SMA20/SMA60 golden cross",
+        61,
+        parameters={"short": 20, "long": 60},
+        unit="days",
+    ),
+    _feature(
+        "trend.sma_days_since_dc_20_60",
+        "moving_average_cross",
+        "trading rows since latest SMA20/SMA60 dead cross",
+        61,
+        parameters={"short": 20, "long": 60},
+        unit="days",
+    ),
     *(
         _feature(
             f"trend.ema_distance_{window}d",
@@ -227,6 +243,22 @@ V1_ADDITIONAL_DEFINITIONS = (
         parameters={"fast": 12, "slow": 26, "signal": 9},
         unit="flag",
     ),
+    _feature(
+        "macd.days_since_golden_cross",
+        "macd",
+        "trading rows since latest MACD golden cross",
+        35,
+        parameters={"fast": 12, "slow": 26, "signal": 9},
+        unit="days",
+    ),
+    _feature(
+        "macd.days_since_dead_cross",
+        "macd",
+        "trading rows since latest MACD dead cross",
+        35,
+        parameters={"fast": 12, "slow": 26, "signal": 9},
+        unit="days",
+    ),
     _feature("rsi.14", "rsi", "Wilder RSI(14)", 15, parameters={"window": 14}, unit="index"),
     _feature(
         "bollinger.percent_b_20_2",
@@ -254,16 +286,16 @@ V1_ADDITIONAL_DEFINITIONS = (
             unit="index",
         )
         for name, formula, warmup in (
-            ("plus_di", "+DI using Wilder smoothing", 14),
-            ("minus_di", "-DI using Wilder smoothing", 14),
-            ("adx", "Wilder average of DX", 27),
+            ("plus_di", "+DI using aligned Wilder TR/DM smoothing", 15),
+            ("minus_di", "-DI using aligned Wilder TR/DM smoothing", 15),
+            ("adx", "Wilder average of DX after aligned DI seed", 28),
         )
     ),
     _feature(
         "risk.atr_14",
         "volatility",
         "Wilder average of true range",
-        14,
+        15,
         inputs=("adjusted_high", "adjusted_low", "adjusted_close"),
         parameters={"window": 14},
         unit="price",
@@ -272,7 +304,7 @@ V1_ADDITIONAL_DEFINITIONS = (
         "risk.natr_14",
         "volatility",
         "100 * ATR14 / adjusted_close",
-        14,
+        15,
         inputs=("adjusted_high", "adjusted_low", "adjusted_close"),
         parameters={"window": 14},
         unit="percent",

@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from stock_ai.ml.experiments import ExperimentRecord, ExperimentRegistry
 
 
@@ -17,6 +19,10 @@ def test_rejected_experiment_is_preserved_append_only(tmp_path: Path) -> None:
         hypothesis="V1 Ridge improves rank IC over V0 on deterministic fixture mechanics",
         data_snapshot_id="fixture-snapshot",
         feature_set_version="1.0.0",
+        preprocessing_version="raw-v1",
+        feature_definition_hashes={"price.return_20d": "hash"},
+        code_commit="fixture-commit",
+        config_hash="fixture-config-hash",
         model_type="ridge",
         parameters={"alpha": 5.0},
         seed=None,
@@ -33,3 +39,7 @@ def test_rejected_experiment_is_preserved_append_only(tmp_path: Path) -> None:
     assert len(lines) == 2
     assert json.loads(lines[0])["decision"] == "rejected"
     assert json.loads(lines[1])["experiment_id"] == "E2-fixture-ridge-repeat"
+    with pytest.raises(TypeError):
+        record.parameters["alpha"] = 1.0  # type: ignore[index]
+    with pytest.raises(ValueError, match="already exists"):
+        registry.append(record)

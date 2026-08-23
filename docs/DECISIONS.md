@@ -204,6 +204,18 @@ Daily Portfolio Decision EngineのMVPは、明示的candidate universe内の100�
 
 初期Tax Engineは、NISAの即時税影響0、課税口座の設定税率、年内確定損益、ユーザー入力の繰越損失を使う意思決定用推定とする。取得費・複雑な損益通算・申告確定額を断定せず、すべて推定として出力する。
 
+### D038 — Goal 1ラベルの意味
+
+実前場・12:30価格が未接続のGoal 1では、1日・5日・20日の調整後終値間absolute returnを研究proxyとして明示する。これは本番の12:30 entryやTOPIX/sector超過リターン予測を意味しない。label endpointの`available_at`がsnapshot cutoffを超える場合はlabelを保存しない。
+
+### D039 — Sector / Breadthの入力境界
+
+sector-relative値とmarket breadthはcandidate subsetから再計算しない。履歴時点で確定した明示的sector contextとmarket contextをFeature Engineへ渡し、coverageまたは必要capability不足時はfail closedする。
+
+### D040 — 税の経済効果と決済現金
+
+推定税負担、NISA機会費用、証券会社の推定源泉徴収による決済現金影響を別フィールドにする。同一口座bucketの複数売却は一括評価し、同じ損失繰越や年内利益を重複利用しない。
+
 ## 暫定デフォルト
 
 以下は現在の仮置きで、実験・設定により変更可能。
@@ -341,7 +353,10 @@ V1 Coreは約40〜60特徴を目安にするが、同じ指標の生値・順位
 ### 2026-08-24
 
 - Goal 1の最新指示に合わせ、BaselineをMomentum / Ridgeへ限定
-- FeatureSet V0 / V1 Coreの初期manifestを54特徴で固定
+- FeatureSet V0 / V1 Coreの初期manifestを58特徴で固定（cross後経過日数を含む）
 - Goal 1のテクニカル実装をNumPy / pandas + 既知値testに決定
 - 離散optimizerの上限超過をfail closedに決定
 - Goal 1 Tax Engineの推定範囲を固定
+- label availability、cross-sectional Rank IC、locked holdoutを追加
+- sector / breadthをcandidate subsetから分離した明示入力へ変更
+- 税の経済効果、NISA機会費用、源泉徴収cash effectを分離

@@ -9,13 +9,14 @@ from stock_ai.decision.engine import (
     classify_action,
 )
 from stock_ai.decision.simulator import apply_executions
-from stock_ai.decision.tax import SimpleJapanTaxEngine, TaxEstimate, TaxPolicy
+from stock_ai.decision.tax import SaleTaxInput, SimpleJapanTaxEngine, TaxEstimate, TaxPolicy
 
 __all__ = [
     "CostPolicy",
     "DailyPortfolioDecisionEngine",
     "DecisionCandidate",
     "DecisionEngineConfig",
+    "SaleTaxInput",
     "SearchSpaceTooLarge",
     "SimpleJapanTaxEngine",
     "TaxEstimate",
