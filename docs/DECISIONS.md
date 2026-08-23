@@ -216,6 +216,34 @@ sector-relative値とmarket breadthはcandidate subsetから再計算しない�
 
 推定税負担、NISA機会費用、証券会社の推定源泉徴収による決済現金影響を別フィールドにする。同一口座bucketの複数売却は一括評価し、同じ損失繰越や年内利益を重複利用しない。
 
+### D041 — J-Quants V2専用境界
+
+日次公式データadapterは`https://api.jquants.com/v2`だけを許可し、V1 token、mail/password、refresh token、設定ファイル読込を実装しない。認証値はlive command起動時にprocess環境の`JQUANTS_API_KEY`からだけ読み、header・例外・log・manifest・fixture・Markdownへ値を出力しない。
+
+### D042 — 初回取得以前へ訂正値を遡及させない
+
+J-Quants REST responseは現在返される値の過去訂正時刻を提供しない。したがってGoal 2Aのexternal recordは`available_at = received_at`とし、初回backfillを過去の予測時点から利用可能だった値として扱わない。同一natural keyの後日訂正は新しいimmutable objectとして保存し、PIT queryはcutoffまでに受信した最新版だけを返す。初回取得以前の完全なrevision historyは`PARTIAL` capabilityとする。
+
+### D043 — Content-addressed immutable object
+
+raw / normalizedは`dataset + source_date + payload_hash + schema_version`から識別するimmutable Parquet objectとする。Parquetとmanifestを一時directoryへ完成させてからdirectory単位で公開し、同一payloadの再取得は重複させない。中断・品質失敗・catalog失敗は既存の正常objectを置換しない。
+
+### D044 — Raw価格とresearch調整価格の分離
+
+`/v2/equities/bars/daily`の`O/H/L/C/Vo`をexecution参照用raw系列、`AdjO/AdjH/AdjL/AdjC/AdjVo`をresearch用系列として別columnに保存する。`AdjFactor`とpayload由来の`adjustment_version`を保持し、両者を暗黙に上書きしない。
+
+### D045 — Provider codeと内部symbol
+
+J-Quants V2の5文字`Code`は`provider_code`として原値保存し、末尾のprovider桁を除いた4文字を内部`symbol`とする。数字・英字を含む新証券コードを許可し、整数化しない。
+
+### D046 — Capabilityは推測で補完しない
+
+利用planと実装範囲を`AVAILABLE / PARTIAL / BLOCKED_BY_PLAN / BLOCKED_BY_DATA_CAPABILITY / OUT_OF_SCOPE`で明示する。Goal 2Aでは財務summaryの期末発行株式数を日次株式数へ補間せず、breadthは全銘柄coverage検証前、historical universeは初回取得以前の訂正履歴欠落を理由に`PARTIAL`とする。
+
+### D047 — Goal 2Aの取得単位
+
+Free planでも安全に動く既定datasetは銘柄master、株価日足、財務summaryとする。Light以上の営業日calendarとTOPIXは明示選択する。全endpointは日付単位、逐次rate limit、`pagination_key`追跡、429/5xxのbounded retryで取得し、fixtureへのproduction fallbackは行わない。
+
 ## 暫定デフォルト
 
 以下は現在の仮置きで、実験・設定により変更可能。
@@ -360,3 +388,7 @@ V1 Coreは約40〜60特徴を目安にするが、同じ指標の生値・順位
 - label availability、cross-sectional Rank IC、locked holdoutを追加
 - sector / breadthをcandidate subsetから分離した明示入力へ変更
 - 税の経済効果、NISA機会費用、源泉徴収cash effectを分離
+- Goal 2AをJ-Quants V2専用・環境変数認証・immutable Parquet + DuckDBに固定
+- 初回取得以前へprovider訂正値を遡及させず、`available_at = received_at`に固定
+- 同一payloadのidempotent再取得、後日訂正の別version、atomic publishを固定
+- plan / data capability不足を推測値で補わず明示状態に固定

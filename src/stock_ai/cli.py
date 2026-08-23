@@ -11,6 +11,18 @@ import numpy as np
 import pandas as pd
 import typer
 
+from stock_ai.data import (
+    DatasetName,
+    DuckDBCatalog,
+    ImmutableParquetStore,
+    JQuantsError,
+    JQuantsV2Client,
+    JQuantsV2Config,
+    JQuantsV2Ingestor,
+    StorageIntegrityError,
+    SubscriptionPlan,
+    capabilities_for,
+)
 from stock_ai.decision import (
     CostPolicy,
     DailyPortfolioDecisionEngine,
@@ -47,6 +59,11 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Japanese-stock decision-support research commands (never submits orders).",
 )
+data_app = typer.Typer(
+    no_args_is_help=True,
+    help="Acquire, verify, and inspect immutable J-Quants V2 data.",
+)
+app.add_typer(data_app, name="data")
 
 
 @app.callback()
@@ -56,6 +73,113 @@ def main() -> None:
 
 def _decimal(value: float) -> Decimal:
     return Decimal(str(round(value, 4)))
+
+
+@data_app.command("capabilities")
+def data_capabilities(
+    plan: Annotated[
+        SubscriptionPlan,
+        typer.Option(help="Declared J-Quants subscription plan; no API call is made."),
+    ] = SubscriptionPlan.FREE,
+) -> None:
+    """Print the fail-closed Goal 2A source-capability table."""
+
+    typer.echo("capability status minimum_plan endpoint reason")
+    for item in capabilities_for(plan):
+        minimum_plan = "-" if item.minimum_plan is None else item.minimum_plan.value
+        endpoint = item.source_endpoint or "-"
+        reason = item.reason or "-"
+        typer.echo(f"{item.name} {item.status.value} {minimum_plan} {endpoint} {reason}")
+
+
+@data_app.command("sync")
+def data_sync(
+    source_date: Annotated[
+        str,
+        typer.Option("--date", help="Provider source date (YYYY-MM-DD)."),
+    ],
+    data_root: Annotated[
+        Path,
+        typer.Option(help="Root containing immutable raw/normalized object directories."),
+    ] = Path("data"),
+    catalog_path: Annotated[
+        Path | None,
+        typer.Option(help="DuckDB catalog path; defaults below data-root."),
+    ] = None,
+    plan: Annotated[
+        SubscriptionPlan,
+        typer.Option(help="Declared subscription plan used for throttling and fail-closed access."),
+    ] = SubscriptionPlan.FREE,
+    datasets: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Comma-separated datasets: security_master,daily_prices,"
+                "financial_summary,trading_calendar,topix."
+            )
+        ),
+    ] = "security_master,daily_prices,financial_summary",
+) -> None:
+    """Fetch one date from J-Quants V2; never falls back to fixture data."""
+
+    selected = _parse_datasets(datasets)
+    try:
+        source_day = date.fromisoformat(source_date)
+    except ValueError as exc:
+        raise typer.BadParameter("--date must use YYYY-MM-DD") from exc
+    target_catalog = catalog_path or data_root / "catalog.duckdb"
+    try:
+        with (
+            JQuantsV2Client.from_env(config=JQuantsV2Config(plan=plan)) as client,
+            DuckDBCatalog(target_catalog) as catalog,
+        ):
+            result = JQuantsV2Ingestor(
+                client=client,
+                store=ImmutableParquetStore(data_root),
+                catalog=catalog,
+            ).sync_date(source_day, datasets=selected)
+    except JQuantsError as exc:
+        typer.echo(f"ingestion blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"run={result.ingestion_run_id} status={result.status.value} "
+        f"source_date={result.source_date.isoformat()} objects={len(result.objects)}"
+    )
+    typer.echo("No fixture fallback was used. No securities order was submitted.")
+
+
+@data_app.command("verify")
+def data_verify(
+    data_root: Annotated[
+        Path,
+        typer.Option(help="Root containing immutable raw/normalized object directories."),
+    ] = Path("data"),
+) -> None:
+    """Verify every published object manifest and Parquet hash."""
+
+    store = ImmutableParquetStore(data_root)
+    manifests = sorted(data_root.glob("*/jquants_v2/*/source_date=*/*/manifest.json"))
+    verified = 0
+    try:
+        for manifest in manifests:
+            store.verify(manifest.parent)
+            verified += 1
+    except StorageIntegrityError as exc:
+        typer.echo(f"verification failed: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"verified_objects={verified} status=OK")
+
+
+def _parse_datasets(value: str) -> tuple[DatasetName, ...]:
+    names = tuple(part.strip() for part in value.split(",") if part.strip())
+    if not names:
+        raise typer.BadParameter("at least one dataset is required")
+    try:
+        selected = tuple(DatasetName(name) for name in names)
+    except ValueError as exc:
+        allowed = ",".join(item.value for item in DatasetName)
+        raise typer.BadParameter(f"unknown dataset; allowed values: {allowed}") from exc
+    return tuple(dict.fromkeys(selected))
 
 
 @app.command("fixture-demo")

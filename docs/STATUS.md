@@ -1,7 +1,7 @@
 # Project Status
 
 更新日: 2026-08-24
-状態: `GOAL_1_CORE_MVP_IMPLEMENTED`
+状態: `GOAL_2A_JQUANTS_V2_DATA_FOUNDATION_IMPLEMENTED`
 
 ## Goal 1で実装したもの
 
@@ -69,6 +69,47 @@ fixture OHLCV / 財務 / TOPIX / sector / breadth
 
 fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は送信しない。
 
+## Goal 2Aで実装したもの
+
+### J-Quants V2 acquisition
+
+- V2固定base URLと`x-api-key`認証の専用client
+- credentialはlive起動時にprocess環境の`JQUANTS_API_KEY`からだけ読込
+- V1 token、mail/password、refresh token、設定file、`.env`自動読込を非実装
+- `pagination_key`全page取得、循環/page上限検出
+- plan別逐次rate limit、`/fins/summary`個別limit、`Retry-After`、429/5xx/network bounded retry
+- sanitized errorはstatusとendpointだけを持ち、headerとresponse bodyを含めない
+- Free既定: 銘柄master、株価日足、財務summary
+- Light明示選択: 営業日calendar、TOPIX日足
+
+### Immutable storage / catalog
+
+- raw / normalizedをcontent-addressed immutable Parquet objectとして保存
+- Parquet + manifestを一時directoryで完成後、directory単位でatomic publish
+- payload再取得をobject IDでdeduplicateし、訂正payloadを別versionとして保存
+- Parquet SHA-256、payload hash、schema version、row数、品質結果をmanifestへ保存
+- DuckDBへingestion run、object、run-object対応、品質issueをtransaction記録
+- 中断または品質失敗時も既存の正常objectを置換しない
+- manifest/path/hash不整合を検出する`stock-ai data verify`
+
+### Normalization / point-in-time
+
+- 全external recordへ`provider/source_endpoint/source_date/received_at/available_at/as_of/payload_hash/schema_version/ingestion_run_id/source_record_hash`を付与
+- J-Quants 5文字codeを原値`provider_code`として保持し、内部4文字`symbol`を別保存
+- 日足のraw execution参照系列とresearch調整系列、`AdjFactor`、adjustment versionを分離
+- 財務開示日時、主要実績・予想値、期末発行株式数・自己株式数を正規化
+- 営業日区分0/1/2/3を保持し、equity business dayを1/2だけに限定
+- APIが過去訂正時刻を返さないため`available_at = received_at`とし、初回取得前へ値を遡及させない
+- DuckDB PIT読取はcutoffまでに受信したnatural key最新版だけを返す
+
+### Quality / capability
+
+- required schema、natural key重複、requested date、issue code、OHLC、volume、adjustment factor、disclosure時刻を検証
+- 品質errorはrawとreportを残すがnormalized publishを止め、runを`FAILED`にする
+- plan / data capabilityを`AVAILABLE / PARTIAL / BLOCKED_BY_PLAN / BLOCKED_BY_DATA_CAPABILITY / OUT_OF_SCOPE`で明示
+- 期末発行株式数、初回取得以前のhistorical universe訂正、coverage未確認breadthを`PARTIAL`として推測補完しない
+- 認証なしlive commandは停止し、fixtureへのproduction fallbackを行わない
+
 ## 検証結果
 
 2026-08-24に非editable install後、以下を実行した。
@@ -81,14 +122,17 @@ python -m uv run --no-sync pytest -q
 python -m uv run --no-sync pytest --cov=stock_ai --cov-branch --cov-report=term-missing -q
 python -m uv run --no-sync stock-ai --help
 python -m uv run --no-sync stock-ai fixture-demo --snapshot-dir .demo-artifacts/final-dataset
+python -m uv run --no-sync stock-ai data capabilities --plan free
 ```
 
 - Ruff: pass
-- mypy strict: pass（22 source files）
-- pytest: 63 pass
-- branch coverage: 87.08%（設定threshold 85%を通過）
+- mypy strict: pass（28 source files）
+- pytest: 78 pass
+- branch coverage: 86.11%（設定threshold 85%を通過）
 - installed console entry point: pass
 - deterministic E2E: pass、58 features、1,360 rows、3 validation folds
+- Goal 2A fixture integration: 5 V2 endpoint、raw/normalized各5 object、PIT read pass
+- idempotent refetch、non-retroactive correction、atomic failure、tamper、secret non-persistence: pass
 
 read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/cost、software reliability）で実施し、主なhigh findingを回帰test化した。reviewerはfileを変更していない。
 
@@ -102,20 +146,26 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - datasetのParquet/JSON二ファイルpublishとJSONL experiment registryは単一processのGoal 1実装で、inter-process transaction/lockは未実装
 - Git外でartifactを生成する場合は`STOCK_AI_CODE_COMMIT`を明示しないとprovenanceが`UNSET`になる
 - fixtureのvalidation結果からprofitabilityを推論しない。最終holdoutはfixture E2Eでも未使用のまま保持する
+- J-Quants APIは過去訂正の発生時刻を返さないため、初回取得以前の完全なrevision historyは復元不能
+- `available_at = received_at`により安全側へ倒すため、初回backfillを過去の予測日時の入力には使えない
+- `/fins/summary`の`ShOutFY`は期末開示値であり、日次shares outstanding seriesではない
+- J-Quants planは自動判定せず、CLIで宣言したplanより上のendpointをfail closedする
+- historical bulk download最適化と完全なlisting/delisting/corporate-action event lineageは未実装
 
 ## 実データ/APIまでblockedの項目
 
-- J-Quants adapter、API key/plan、公式daily price・財務・銘柄master・TOPIX履歴
+- 実行環境のJ-Quants API key/契約planと、credentialを表示しないlive API smoke結果
+- 初回取得以前のprovider correction vintage、完全なlisting/delisting/corporate-action event lineage
 - 11:30時点の前場価格、出来高、market breadth、同時刻履歴
-- PIT universe membership、sector history、shares outstanding/corporate action履歴
+- 日次shares outstanding、coverage検証済みmarket breadth、需給履歴
 - SBI等の保有・約定CSV mapping、実fee条件、実口座・NISA残枠・税状態
 - spread/slippage/market-impact calibration、live/paper forward observation
 - broker integrationと注文送信は仕様上blockedではなく、製品方針として対象外
 
 ## 次のGoal
 
-1. J-Quantsと選定したmorning data sourceのPIT adapter、revision lineage、capability reportを実装する。
-2. 12:30 entry / 1・5・20日excess return labelと売買停止・上場廃止policyを確定する。
-3. OOF uncertainty calibration、locked holdout運用、Momentum/Ridge以外の比較modelとfeature-family ablationを追加する。
-4. broker/口座別cost・tax policy router、NISA capacity model、inter-process artifact transactionを実装する。
-5. 大規模universe optimizer、paper/forward validation、状態付きdecision evaluationへ進む。
+1. Goal 2Bでhistorical bulk retrieval、listing/delisting/corporate-action lineage、初回snapshot境界を拡張する。
+2. coverage検証済みsector history / market breadth / shares outstanding seriesを接続する。
+3. 12:30 entry / 1・5・20日excess return labelと売買停止・上場廃止policyを確定する。
+4. morning data source、OOF uncertainty calibration、locked holdout運用を進める。
+5. broker/口座別cost・tax policy routerとpaper/forward validationへ進む。注文送信は対象外のままとする。

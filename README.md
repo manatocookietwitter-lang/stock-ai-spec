@@ -1,7 +1,7 @@
 # Stock AI Decision Support — Specification Bundle
 
 更新日: 2026-08-22  
-状態: 仕様整理版 v0.3（UI・特徴量仕様統合、実装前）
+状態: Goal 2A J-Quants V2実データ基盤実装済み
 
 ## このリポジトリの目的
 
@@ -50,6 +50,8 @@ AIやアプリは実注文を出しません。最終判断と注文はユーザ
   - 確定事項と未決事項
 - `docs/STATUS.md`
   - 進行状況、テスト結果、次の作業
+- `docs/JQUANTS_V2_RUNBOOK.md`
+  - Goal 2Aの取得、保存、検証、障害対応、PIT制約
 
 ## Codexでの使い方
 
@@ -134,13 +136,27 @@ Feature Engineは候補銘柄集合からsector値やbreadthを再計算しな�
 sector contextとmarket breadthを入力し、必要capabilityが欠ける場合は
 `BLOCKED_BY_DATA_CAPABILITY`としてfail closedする。
 
+## Goal 2A J-Quants V2データ基盤
+
+公式J-Quants API V2から1日単位で取得し、schema・key・日付・OHLC・調整係数を検証してから、content-addressed immutable ParquetとDuckDB catalogへ保存する。
+
+```text
+stock-ai data capabilities --plan free
+stock-ai data sync --date 2026-08-21 --plan free --data-root data
+stock-ai data verify --data-root data
+```
+
+Free planの既定取得は銘柄master、株価日足、財務summary。Light以上の営業日calendarとTOPIXは`--datasets`で明示する。live取得はprocess環境の`JQUANTS_API_KEY`がない場合に停止し、fixtureへfallbackしない。
+
+株価はexecution参照用raw系列とresearch用調整系列を分け、同じpayloadの再取得は重複させない。訂正値は新versionとして残す。APIが過去訂正時刻を返さないため`available_at = received_at`とし、初回取得より前の時点へbackfill値を遡及させない。詳細は`docs/JQUANTS_V2_RUNBOOK.md`を参照する。
+
 ## 現在のパッケージ構成
 
 - `src/stock_ai/domain`: 口座、保有、予測、提案、ユーザー判断、実約定の不変型
-- `src/stock_ai/data`: `available_at <= as_of` のPoint-in-time検証
+- `src/stock_ai/data`: J-Quants V2 client、品質検証、immutable Parquet、DuckDB、PIT読取
 - `src/stock_ai/features`: Feature Registry、V0/V1 manifest、指標計算
 - `src/stock_ai/ml`: dataset snapshot、1/5/20日label、Momentum/Ridge、時系列検証、実験記録
 - `src/stock_ai/decision`: コスト、税、全体ポートフォリオ比較、状態遷移
 - `tests`: 外部API不要の決定的fixtureテスト
 
-APIキーや認証情報をソースへ置かない。ローカル設定は `.env.example` をコピーして使い、`.env` はGitへ追加しない。
+APIキーや認証情報をsource、log、例外、fixture、Markdown、Git履歴へ置かない。live clientはprocess環境の`JQUANTS_API_KEY`だけを読み、`.env`や設定fileを自動読込しない。
