@@ -1,0 +1,290 @@
+"""Causal FeatureSet V0/V1 Core calculation over completed daily bars."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Final
+
+import numpy as np
+import pandas as pd
+
+from stock_ai.data.point_in_time import point_in_time_view
+from stock_ai.features.catalog import V1_CORE_MANIFEST
+from stock_ai.features.indicators import (
+    atr,
+    bollinger,
+    cross_flags,
+    directional_movement,
+    ema,
+    macd,
+    mfi,
+    obv,
+    rsi,
+    sma,
+)
+from stock_ai.features.registry import FeatureSetManifest
+
+DAILY_REQUIRED: Final = {
+    "symbol",
+    "sector",
+    "trading_date",
+    "available_at",
+    "adjusted_high",
+    "adjusted_low",
+    "adjusted_close",
+    "adjusted_volume",
+    "trading_value",
+}
+MARKET_REQUIRED: Final = {"trading_date", "available_at", "topix_close"}
+FINANCIAL_COLUMNS: Final = (
+    "per",
+    "pbr",
+    "roe",
+    "operating_margin",
+    "revenue_growth_yoy",
+    "operating_profit_growth_yoy",
+    "forecast_revision",
+)
+
+
+def _require_columns(frame: pd.DataFrame, columns: set[str], label: str) -> None:
+    missing = columns - set(frame.columns)
+    if missing:
+        raise ValueError(f"{label} is missing required columns: {sorted(missing)}")
+
+
+def _compute_symbol(group: pd.DataFrame) -> pd.DataFrame:
+    group = group.sort_values("trading_date").copy()
+    close = group["adjusted_close"].astype(float)
+    high = group["adjusted_high"].astype(float)
+    low = group["adjusted_low"].astype(float)
+    volume = group["adjusted_volume"].astype(float)
+    trading_value = group["trading_value"].astype(float)
+
+    output = group[["symbol", "sector", "trading_date", "available_at"]].copy()
+    output["adjusted_close"] = close
+    one_day_return = close.pct_change(fill_method=None)
+    output["__return_1d"] = one_day_return
+    for window in (1, 5, 20, 60, 120):
+        output[f"price.return_{window}d"] = close.pct_change(window, fill_method=None)
+    for window in (20, 60):
+        output[f"risk.realized_vol_{window}d"] = one_day_return.rolling(
+            window, min_periods=window
+        ).std(ddof=1) * np.sqrt(252)
+
+    volume_mean_20 = volume.rolling(20, min_periods=20).mean()
+    output["volume.ratio_20d"] = volume / volume_mean_20
+    output["liquidity.trading_value"] = trading_value
+    output["liquidity.trading_value_mean_20d"] = trading_value.rolling(20, min_periods=20).mean()
+    output["price.distance_52w_high"] = close / high.rolling(250, min_periods=250).max() - 1
+    output["price.distance_52w_low"] = close / low.rolling(250, min_periods=250).min() - 1
+
+    sma_20 = sma(close, 20)
+    sma_60 = sma(close, 60)
+    sma_200 = sma(close, 200)
+    for window, average in ((20, sma_20), (60, sma_60), (200, sma_200)):
+        output[f"trend.sma_distance_{window}d"] = close / average - 1
+    output["trend.sma_slope_20d_5d"] = (sma_20 / sma_20.shift(5) - 1) / 5
+    output["trend.sma_slope_60d_5d"] = (sma_60 / sma_60.shift(5) - 1) / 5
+    output["trend.sma_spread_20_60"] = sma_20 / sma_60 - 1
+    sma_gc, sma_dc = cross_flags(sma_20, sma_60)
+    output["trend.sma_gc_20_60"] = sma_gc
+    output["trend.sma_dc_20_60"] = sma_dc
+
+    for window in (12, 26):
+        output[f"trend.ema_distance_{window}d"] = close / ema(close, window) - 1
+    macd_value, signal, histogram = macd(close)
+    output["macd.value_pct_price"] = macd_value / close
+    output["macd.signal_pct_price"] = signal / close
+    output["macd.histogram_pct_price"] = histogram / close
+    macd_gc, macd_dc = cross_flags(macd_value, signal)
+    output["macd.golden_cross"] = macd_gc
+    output["macd.dead_cross"] = macd_dc
+    output["rsi.14"] = rsi(close, 14)
+
+    _, _, _, percent_b, width = bollinger(close, 20, 2)
+    output["bollinger.percent_b_20_2"] = percent_b
+    output["bollinger.width_20_2"] = width
+    plus_di, minus_di, adx = directional_movement(high, low, close, 14)
+    output["trend.plus_di_14"] = plus_di
+    output["trend.minus_di_14"] = minus_di
+    output["trend.adx_14"] = adx
+    average_true_range = atr(high, low, close, 14)
+    output["risk.atr_14"] = average_true_range
+    output["risk.natr_14"] = 100 * average_true_range / close
+    output["volume.ratio_5_60"] = (
+        volume.rolling(5, min_periods=5).mean() / volume.rolling(60, min_periods=60).mean()
+    )
+    if "shares_outstanding" in group:
+        turnover = volume / group["shares_outstanding"].astype(float)
+        output["liquidity.turnover_20d"] = turnover.rolling(20, min_periods=20).mean()
+    else:
+        output["liquidity.turnover_20d"] = np.nan
+    on_balance_volume = obv(close, volume)
+    output["volume.obv_slope_5d"] = (
+        (on_balance_volume - on_balance_volume.shift(5)) / volume_mean_20 / 5
+    )
+    output["volume.mfi_14"] = mfi(high, low, close, volume, 14)
+    return output
+
+
+def _merge_financials(features: pd.DataFrame, financials: pd.DataFrame | None) -> pd.DataFrame:
+    output_parts: list[pd.DataFrame] = []
+    if financials is None:
+        output = features.copy()
+        for column in FINANCIAL_COLUMNS:
+            output[f"fundamental.{column}"] = np.nan
+        return output
+
+    required = {"symbol", "available_at", *FINANCIAL_COLUMNS}
+    _require_columns(financials, required, "financial data")
+    right = financials.copy()
+    right["available_at"] = pd.to_datetime(right["available_at"], utc=True)
+    for symbol, left_group in features.groupby("symbol", sort=False):
+        right_group = right.loc[right["symbol"] == symbol, ["available_at", *FINANCIAL_COLUMNS]]
+        left_group = left_group.sort_values("available_at")
+        if right_group.empty:
+            merged = left_group.copy()
+            for column in FINANCIAL_COLUMNS:
+                merged[column] = np.nan
+        else:
+            merged = pd.merge_asof(
+                left_group,
+                right_group.sort_values("available_at"),
+                on="available_at",
+                direction="backward",
+                allow_exact_matches=True,
+            )
+        output_parts.append(merged)
+    output = pd.concat(output_parts, ignore_index=True)
+    return output.rename(columns={column: f"fundamental.{column}" for column in FINANCIAL_COLUMNS})
+
+
+class FeatureEngine:
+    """Computes only causal daily features for the explicitly supplied data."""
+
+    def __init__(self, manifest: FeatureSetManifest = V1_CORE_MANIFEST) -> None:
+        self.manifest = manifest
+
+    def transform(
+        self,
+        daily: pd.DataFrame,
+        market_context: pd.DataFrame,
+        *,
+        financials: pd.DataFrame | None = None,
+        as_of: datetime | pd.Timestamp | None = None,
+    ) -> pd.DataFrame:
+        _require_columns(daily, DAILY_REQUIRED, "daily market data")
+        _require_columns(market_context, MARKET_REQUIRED, "market context data")
+        safe_daily = daily.copy()
+        safe_market = market_context.copy()
+        safe_daily["available_at"] = pd.to_datetime(safe_daily["available_at"], utc=True)
+        safe_market["available_at"] = pd.to_datetime(safe_market["available_at"], utc=True)
+        safe_daily["trading_date"] = pd.to_datetime(safe_daily["trading_date"]).dt.normalize()
+        safe_market["trading_date"] = pd.to_datetime(safe_market["trading_date"]).dt.normalize()
+        if as_of is not None:
+            safe_daily = point_in_time_view(safe_daily, as_of)
+            safe_market = point_in_time_view(safe_market, as_of)
+            if financials is not None:
+                financials = point_in_time_view(financials, as_of)
+        if safe_daily.duplicated(["symbol", "trading_date"]).any():
+            raise ValueError("daily data contains duplicate symbol/trading_date rows")
+        if safe_market.duplicated(["trading_date"]).any():
+            raise ValueError("market context contains duplicate trading_date rows")
+
+        parts = [_compute_symbol(group) for _, group in safe_daily.groupby("symbol", sort=True)]
+        computed = pd.concat(parts, ignore_index=True)
+
+        sector_daily = computed.groupby(["sector", "trading_date"], as_index=False).agg(
+            {"__return_1d": "mean"}
+        )
+        sector_daily = sector_daily.sort_values(["sector", "trading_date"])
+        for window in (5, 20, 60):
+            sector_daily[f"__sector_{window}d"] = sector_daily.groupby("sector")[
+                "__return_1d"
+            ].transform(
+                lambda values, size=window: (
+                    (1 + values).rolling(size, min_periods=size).apply(np.prod, raw=True) - 1
+                )
+            )
+        sector_feature_columns = [
+            "sector",
+            "trading_date",
+            *[f"__sector_{window}d" for window in (5, 20, 60)],
+        ]
+        computed = computed.merge(
+            sector_daily[sector_feature_columns], on=["sector", "trading_date"], how="left"
+        )
+        for window in (5, 20, 60):
+            computed[f"relative.sector_{window}d"] = (
+                computed[f"price.return_{window}d"] - computed[f"__sector_{window}d"]
+            )
+
+        safe_market = safe_market.sort_values("trading_date").copy()
+        market_return_1d = safe_market["topix_close"].astype(float).pct_change(fill_method=None)
+        safe_market["__topix_return_1d"] = market_return_1d
+        for window in (5, 20, 60):
+            safe_market[f"__topix_{window}d"] = (
+                safe_market["topix_close"].astype(float).pct_change(window, fill_method=None)
+            )
+        safe_market["market.volatility_20d"] = market_return_1d.rolling(20, min_periods=20).std(
+            ddof=1
+        ) * np.sqrt(252)
+        market_columns = [
+            "trading_date",
+            "available_at",
+            "market.volatility_20d",
+            *[f"__topix_{window}d" for window in (5, 20, 60)],
+        ]
+        computed = computed.merge(
+            safe_market[market_columns],
+            on="trading_date",
+            how="left",
+            suffixes=("", "_market"),
+        )
+        market_is_late = computed["available_at_market"] > computed["available_at"]
+        for column in ["market.volatility_20d", *[f"__topix_{w}d" for w in (5, 20, 60)]]:
+            computed.loc[market_is_late, column] = np.nan
+        for window in (5, 20, 60):
+            computed[f"relative.topix_{window}d"] = (
+                computed[f"price.return_{window}d"] - computed[f"__topix_{window}d"]
+            )
+
+        breadth = (
+            computed.groupby("trading_date")["__return_1d"]
+            .apply(
+                lambda values: (
+                    float((values > 0).sum() / values.notna().sum())
+                    if values.notna().any()
+                    else np.nan
+                )
+            )
+            .rename("market.breadth")
+        )
+        computed = computed.merge(breadth, on="trading_date", how="left")
+        computed = _merge_financials(computed, financials)
+        selected = [
+            "symbol",
+            "sector",
+            "trading_date",
+            "available_at",
+            "adjusted_close",
+            *self.manifest.feature_names,
+        ]
+        missing_outputs = set(self.manifest.feature_names) - set(computed.columns)
+        if missing_outputs:
+            raise RuntimeError(
+                f"feature implementation is missing manifest columns: {missing_outputs}"
+            )
+        return computed[selected].sort_values(["trading_date", "symbol"]).reset_index(drop=True)
+
+    def latest_snapshot(
+        self,
+        daily: pd.DataFrame,
+        market_context: pd.DataFrame,
+        *,
+        as_of: datetime | pd.Timestamp,
+        financials: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        history = self.transform(daily, market_context, financials=financials, as_of=as_of)
+        return history.groupby("symbol", as_index=False, sort=True).tail(1).reset_index(drop=True)
