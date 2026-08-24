@@ -290,6 +290,7 @@ def _canonical_daily(
         "raw_close",
         "trading_value",
         "adjustment_factor",
+        "research_open",
         "research_high",
         "research_low",
         "research_close",
@@ -329,6 +330,7 @@ def _canonical_daily(
     frame = frame.rename(
         columns={
             "sector_33_code": "sector",
+            "research_open": "adjusted_open",
             "research_high": "adjusted_high",
             "research_low": "adjusted_low",
             "research_close": "adjusted_close",
@@ -337,6 +339,7 @@ def _canonical_daily(
         }
     )
     numeric = (
+        "adjusted_open",
         "adjusted_high",
         "adjusted_low",
         "adjusted_close",
@@ -349,6 +352,7 @@ def _canonical_daily(
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     invalid = (
         ~np.isfinite(frame[list(numeric)].to_numpy(dtype=float)).all(axis=1)
+        | (frame["adjusted_open"] <= 0)
         | (frame["adjusted_high"] <= 0)
         | (frame["adjusted_low"] <= 0)
         | (frame["adjusted_close"] <= 0)

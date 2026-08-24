@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 import stock_ai.cli as stock_cli
+import stock_ai.ml.advanced as advanced_module
 from stock_ai.cli import app
 from stock_ai.data import DatasetName, HistoricalRevisionPolicy, SubscriptionPlan
 from stock_ai.data.production import build_production_data
@@ -33,7 +35,7 @@ from stock_ai.domain import (
     TaxState,
     WithholdingMode,
 )
-from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST
+from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST
 from stock_ai.ml.production import (
     build_production_feature_sets,
     build_production_supervised_dataset,
@@ -69,6 +71,7 @@ class ContextFrameCatalog(FrameCatalog):
 
 def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frames, dates = _source_frames()
     source_as_of = datetime(2026, 8, 24, tzinfo=UTC)
@@ -108,11 +111,13 @@ def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
     feature_sets = build_production_feature_sets(bundle)
     assert set(V0_MANIFEST.feature_names) <= set(feature_sets.v0)
     assert set(V1_CORE_MANIFEST.feature_names) <= set(feature_sets.v1_core)
+    assert feature_sets.v2_extended is not None
+    assert set(V2_EXTENDED_MANIFEST.feature_names) <= set(feature_sets.v2_extended)
     assert len(feature_sets.v0) == len(feature_sets.v1_core)
     assert feature_sets.v1_core["shares_outstanding_is_missing"].any()
 
     dataset, label_1230_status = build_production_supervised_dataset(
-        feature_sets.v1_core,
+        feature_sets.v2_extended,
         bundle,
         plan=SubscriptionPlan.STANDARD,
     )
@@ -121,8 +126,7 @@ def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
     available_labels = dataset.loc[dataset["label_status_5d"] == "AVAILABLE"]
     label_as_of_dates = pd.to_datetime(available_labels["as_of"], utc=True).dt.tz_convert(JST)
     assert (
-        pd.to_datetime(available_labels["label_entry_date"]).dt.date
-        == label_as_of_dates.dt.date
+        pd.to_datetime(available_labels["label_entry_date"]).dt.date == label_as_of_dates.dt.date
     ).all()
     assert (label_as_of_dates.dt.hour == 11).all()
     assert (label_as_of_dates.dt.minute == 30).all()
@@ -151,6 +155,7 @@ def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
         as_of=datetime(2026, 8, 25, tzinfo=UTC),
         created_at=datetime(2026, 8, 25, 0, 1, tzinfo=UTC),
         label_1230_status=label_1230_status,
+        manifests=(V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST),
     )
     repeated = write_production_dataset_snapshot(
         dataset,
@@ -160,6 +165,7 @@ def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
         as_of=datetime(2026, 8, 25, tzinfo=UTC),
         created_at=datetime(2026, 8, 25, 0, 1, tzinfo=UTC),
         label_1230_status=label_1230_status,
+        manifests=(V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST),
     )
     assert repeated.snapshot_id == snapshot.snapshot_id
     assert snapshot.parquet_path.is_file()
@@ -196,14 +202,338 @@ def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
         as_of=datetime(2026, 8, 25, tzinfo=UTC),
         created_at=datetime(2026, 8, 25, 0, 1, tzinfo=UTC),
     )
+    v2_snapshot = write_production_feature_snapshot(
+        feature_sets.v2_extended,
+        tmp_path / "features-v2",
+        manifest=V2_EXTENDED_MANIFEST,
+        source_snapshot_as_of=source_as_of,
+        source_snapshot_ids=bundle.source_snapshot_ids,
+        as_of=datetime(2026, 8, 25, tzinfo=UTC),
+        created_at=datetime(2026, 8, 25, 0, 1, tzinfo=UTC),
+    )
     build_manifest = write_production_build_manifest(
         v0_snapshot,
         feature_snapshot,
+        v2_snapshot,
         snapshot,
         tmp_path / "builds",
         created_at=datetime(2026, 8, 25, 0, 2, tzinfo=UTC),
     )
     assert load_production_build_manifest(build_manifest.manifest_path) == build_manifest
+    with pytest.raises(ValueError, match="one observation as_of"):
+        write_production_build_manifest(
+            v0_snapshot,
+            feature_snapshot,
+            v2_snapshot.model_copy(update={"as_of": v2_snapshot.as_of - timedelta(days=1)}),
+            snapshot,
+            tmp_path / "as-of-mismatch-builds",
+            created_at=datetime(2026, 8, 25, 0, 2, tzinfo=UTC),
+        )
+    with pytest.raises(ValueError, match="one revision policy"):
+        write_production_build_manifest(
+            v0_snapshot,
+            feature_snapshot,
+            v2_snapshot.model_copy(
+                update={"historical_revision_policy": "STRICT_AS_KNOWN"}
+            ),
+            snapshot,
+            tmp_path / "revision-mismatch-builds",
+            created_at=datetime(2026, 8, 25, 0, 2, tzinfo=UTC),
+        )
+    mismatched_dataset = dataset.copy()
+    mismatched_dataset.loc[mismatched_dataset.index[0], "risk.max_drawdown_120d"] = 0.25
+    mismatched_snapshot = write_production_dataset_snapshot(
+        mismatched_dataset,
+        tmp_path / "mismatched-datasets",
+        source_snapshot_as_of=source_as_of,
+        source_snapshot_ids=bundle.source_snapshot_ids,
+        as_of=datetime(2026, 8, 25, tzinfo=UTC),
+        created_at=datetime(2026, 8, 25, 0, 1, tzinfo=UTC),
+        label_1230_status=label_1230_status,
+        manifests=(V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST),
+    )
+    with pytest.raises(ValueError, match="feature values do not match featureset-v2-extended"):
+        write_production_build_manifest(
+            v0_snapshot,
+            feature_snapshot,
+            v2_snapshot,
+            mismatched_snapshot,
+            tmp_path / "content-mismatch-builds",
+            created_at=datetime(2026, 8, 25, 0, 2, tzinfo=UTC),
+        )
+    with pytest.raises(ValueError, match="V0 manifest mismatch"):
+        write_production_build_manifest(
+            feature_snapshot,
+            v0_snapshot,
+            v2_snapshot,
+            snapshot,
+            tmp_path / "invalid-builds",
+            created_at=datetime(2026, 8, 25, 0, 2, tzinfo=UTC),
+        )
+    experiment_registry = tmp_path / "advanced-experiments.jsonl"
+    advanced_result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "advanced",
+            "--build-manifest",
+            str(build_manifest.manifest_path),
+            "--code-commit",
+            "goal3-cli-test",
+            "--report-root",
+            str(tmp_path / "advanced-reports"),
+            "--experiment-registry",
+            str(experiment_registry),
+            "--horizons",
+            "1",
+            "--initial-train-periods",
+            "20",
+            "--validation-periods",
+            "5",
+            "--step-periods",
+            "5",
+            "--holdout-periods",
+            "5",
+            "--tuning-trials",
+            "1",
+            "--tuning-timeout-seconds",
+            "10",
+            "--estimator-count",
+            "5",
+            "--no-run-ablations",
+            "--no-run-diagnostics",
+        ],
+    )
+    assert advanced_result.exit_code == 0, advanced_result.output
+    success_record = json.loads(experiment_registry.read_text(encoding="utf-8").splitlines()[0])
+    assert success_record["decision"] == "research_only"
+    assert success_record["locked_holdout_accessed"] is False
+    assert success_record["parameters"]["build_id"] == build_manifest.build_id
+    assert success_record["parameters"]["feature_snapshot_id"] == v2_snapshot.snapshot_id
+    assert success_record["parameters"]["report_id"]
+    assert success_record["parameters"]["config_json"]
+    assert success_record["fold_results"][0]["model_family"] == "lightgbm"
+    assert {item["task"] for item in success_record["fold_results"]} == {
+        "large_loss",
+        "quantile",
+        "ranking",
+        "regression",
+    }
+    assert success_record["fold_results"][0]["validation_start"]
+    assert success_record["trial_results"][0]["state"] == "COMPLETE"
+
+    failed_result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "advanced",
+            "--build-manifest",
+            str(build_manifest.manifest_path),
+            "--code-commit",
+            "UNSET",
+            "--experiment-registry",
+            str(experiment_registry),
+            "--horizons",
+            "1",
+            "--initial-train-periods",
+            "20",
+            "--validation-periods",
+            "5",
+            "--step-periods",
+            "5",
+            "--holdout-periods",
+            "5",
+            "--tuning-trials",
+            "1",
+            "--tuning-timeout-seconds",
+            "10",
+            "--estimator-count",
+            "5",
+            "--no-run-ablations",
+            "--no-run-diagnostics",
+        ],
+    )
+    assert failed_result.exit_code == 2
+    records = [
+        json.loads(line)
+        for line in experiment_registry.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["decision"] == "rejected"
+    assert "advanced research code_commit must be explicit" in records[-1]["rejection_reason"]
+
+    invalid_config_result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "advanced",
+            "--build-manifest",
+            str(build_manifest.manifest_path),
+            "--code-commit",
+            "",
+            "--experiment-registry",
+            str(experiment_registry),
+            "--horizons",
+            "",
+        ],
+    )
+    assert invalid_config_result.exit_code == 2
+    records = [
+        json.loads(line)
+        for line in experiment_registry.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["decision"] == "rejected"
+    assert records[-1]["code_commit"] == "UNSET"
+    assert records[-1]["parameters"]["raw_config_json"]
+
+    def forced_tuning_failure(**_: object) -> np.ndarray:
+        raise RuntimeError("forced CLI trial failure")
+
+    monkeypatch.setattr(advanced_module, "_fit_predict", forced_tuning_failure)
+    all_failed_result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "advanced",
+            "--build-manifest",
+            str(build_manifest.manifest_path),
+            "--code-commit",
+            "goal3-failed-trial-test",
+            "--experiment-registry",
+            str(experiment_registry),
+            "--horizons",
+            "1",
+            "--initial-train-periods",
+            "20",
+            "--validation-periods",
+            "5",
+            "--step-periods",
+            "5",
+            "--holdout-periods",
+            "5",
+            "--tuning-trials",
+            "1",
+            "--tuning-timeout-seconds",
+            "10",
+            "--estimator-count",
+            "5",
+            "--no-run-ablations",
+            "--no-run-diagnostics",
+        ],
+    )
+    assert all_failed_result.exit_code == 2
+    records = [
+        json.loads(line)
+        for line in experiment_registry.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["trial_results"][0]["state"] == "FAIL"
+    assert "forced CLI trial failure" in records[-1]["trial_results"][0]["failure_reason"]
+    assert records[-1]["parameters"]["build_id"] == build_manifest.build_id
+    assert records[-1]["parameters"]["feature_snapshot_id"] == v2_snapshot.snapshot_id
+
+    monkeypatch.undo()
+    completed_report, completed_oof = stock_cli.load_advanced_research_run(
+        Path(success_record["parameters"]["oof_path"])
+    )
+    completed_run = advanced_module.AdvancedResearchRun(
+        report=completed_report,
+        oof_predictions=completed_oof,
+    )
+    monkeypatch.setattr(
+        stock_cli,
+        "run_advanced_research",
+        lambda *_args, **_kwargs: completed_run,
+    )
+
+    def forced_artifact_failure(*_: object, **__: object) -> tuple[Path, Path]:
+        raise OSError("forced artifact publication failure")
+
+    monkeypatch.setattr(stock_cli, "write_advanced_research_run", forced_artifact_failure)
+    artifact_failure_result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "advanced",
+            "--build-manifest",
+            str(build_manifest.manifest_path),
+            "--code-commit",
+            "goal3-artifact-failure-test",
+            "--experiment-registry",
+            str(experiment_registry),
+        ],
+    )
+    assert artifact_failure_result.exit_code == 2
+    records = [
+        json.loads(line)
+        for line in experiment_registry.read_text(encoding="utf-8").splitlines()
+    ]
+    artifact_failure_record = records[-1]
+    assert len(artifact_failure_record["trial_results"]) == len(
+        success_record["trial_results"]
+    )
+    assert len(artifact_failure_record["fold_results"]) == len(
+        success_record["fold_results"]
+    )
+    assert artifact_failure_record["parameters"]["build_id"] == build_manifest.build_id
+    assert (
+        artifact_failure_record["parameters"]["feature_snapshot_id"]
+        == v2_snapshot.snapshot_id
+    )
+    assert artifact_failure_record["parameters"]["report_id"] == completed_report.report_id
+
+    monkeypatch.undo()
+    original_generate = advanced_module.generate_oof_predictions
+    oof_call_count = 0
+
+    def forced_post_tuning_failure(*args: object, **kwargs: object) -> pd.DataFrame:
+        nonlocal oof_call_count
+        oof_call_count += 1
+        if oof_call_count == 3:
+            raise RuntimeError("forced CLI post-tuning failure")
+        return original_generate(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        advanced_module, "generate_oof_predictions", forced_post_tuning_failure
+    )
+    partial_failure_result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "advanced",
+            "--build-manifest",
+            str(build_manifest.manifest_path),
+            "--code-commit",
+            "goal3-partial-failure-test",
+            "--experiment-registry",
+            str(experiment_registry),
+            "--horizons",
+            "1",
+            "--initial-train-periods",
+            "20",
+            "--validation-periods",
+            "5",
+            "--step-periods",
+            "5",
+            "--holdout-periods",
+            "5",
+            "--tuning-trials",
+            "1",
+            "--tuning-timeout-seconds",
+            "10",
+            "--estimator-count",
+            "5",
+            "--no-run-ablations",
+            "--no-run-diagnostics",
+        ],
+    )
+    assert partial_failure_result.exit_code == 2
+    records = [
+        json.loads(line)
+        for line in experiment_registry.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["trial_results"][0]["state"] == "COMPLETE"
+    assert {item["task"] for item in records[-1]["fold_results"]} == {"regression"}
+    assert records[-1]["parameters"]["build_id"] == build_manifest.build_id
+    assert records[-1]["parameters"]["feature_snapshot_id"] == v2_snapshot.snapshot_id
 
     renamed = dataset.rename(columns={"market.breadth": "market.breadth.renamed"})
     renamed_snapshot = write_production_dataset_snapshot(
@@ -214,6 +544,7 @@ def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
         as_of=datetime(2026, 8, 25, tzinfo=UTC),
         created_at=datetime(2026, 8, 25, 0, 1, tzinfo=UTC),
         label_1230_status=label_1230_status,
+        manifests=(V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST),
     )
     assert renamed_snapshot.snapshot_id != snapshot.snapshot_id
 
@@ -234,9 +565,7 @@ def test_future_price_mutation_does_not_change_prior_production_features() -> No
     changed_daily = bundle.daily.copy()
     final_date = changed_daily["trading_date"].max()
     changed_daily.loc[changed_daily["trading_date"] == final_date, "adjusted_close"] *= 10
-    changed = build_production_feature_sets(
-        replace(bundle, daily=changed_daily)
-    ).v1_core
+    changed = build_production_feature_sets(replace(bundle, daily=changed_daily)).v1_core
     prior_columns = ["symbol", "trading_date", *V1_CORE_MANIFEST.feature_names]
     original_prior = original.loc[original["trading_date"] < final_date, prior_columns].reset_index(
         drop=True
@@ -328,9 +657,7 @@ def test_real_data_research_predictions_reach_decision_engine_without_order_path
         holdout_periods=30,
     )
     latest_date = feature_sets.v1_core["trading_date"].max()
-    latest = feature_sets.v1_core.loc[
-        feature_sets.v1_core["trading_date"] == latest_date
-    ].copy()
+    latest = feature_sets.v1_core.loc[feature_sets.v1_core["trading_date"] == latest_date].copy()
     as_of = pd.Timestamp(latest["available_at"].max()).to_pydatetime()
     account = Account(account_id="research", broker="manual", display_name="Research")
     bucket = AccountBucket(
@@ -544,7 +871,7 @@ def test_production_build_orchestration_publishes_one_verifiable_batch(
 
     verified = CliRunner().invoke(app, ["data", "verify", "--data-root", str(tmp_path)])
     assert verified.exit_code == 0
-    assert "feature_snapshots=2 dataset_snapshots=1 builds=1 status=OK" in verified.stdout
+    assert "feature_snapshots=3 dataset_snapshots=1 builds=1 status=OK" in verified.stdout
 
 
 def _source_frames() -> tuple[dict[DatasetName, pd.DataFrame], pd.DatetimeIndex]:
@@ -583,6 +910,7 @@ def _source_frames() -> tuple[dict[DatasetName, pd.DataFrame], pd.DatetimeIndex]
                     "raw_close": raw_close,
                     "trading_value": base * 100_000,
                     "adjustment_factor": adjustment,
+                    "research_open": base * 0.995,
                     "research_high": base * 1.01,
                     "research_low": base * 0.99,
                     "research_close": float(base),

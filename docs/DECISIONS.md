@@ -432,9 +432,9 @@ correction-PITであるとは表示しない。
 feature日がholdout前でもdevelopmentから除外する。12:30 exact labelは行単位のentry/end/available_at/statusを持つ場合だけ
 利用し、Standard planでは推測しない。
 
-### D056 — Production buildは3 snapshotのatomic publication markerで完成とする
+### D056 — Production buildはstaged featureとdatasetのatomic publication markerで完成とする
 
-V0、V1 Core、Production Datasetはそれぞれcontent-addressed directoryとしてatomic publishし、三つすべての検証後に
+V0、V1 Core、V2 Extended、Production Datasetはそれぞれcontent-addressed directoryとしてatomic publishし、全snapshotの検証後に
 Production Build Manifestを最後にatomic publishする。各snapshotは列名・dtype・値・source frame ID・manifest hashをidentityへ
 含める。`data verify`はDuckDB catalog、immutable object、Bulk checkpoint、feature/dataset snapshot、build manifestを相互照合し、
 空store、orphan snapshot、partial build、改ざんを成功扱いしない。
@@ -444,3 +444,29 @@ Production Build Manifestを最後にatomic publishする。各snapshotは列名
 API keyが現在processへ継承されていない、契約planに必要endpointがない、providerがrevision historyを提供しない等の外部制約は
 `BLOCKED_BY_*`または`PARTIAL`としてSTATUSへ固定する。推測データで埋めず、Goal 2の独立して検証可能な実装と品質gateを完了後、
 recoverable checkpointを作り、Goal 3以降の外部制約に依存しない作業を継続する。
+
+### D058 — Goal 3の選択・tuning・stackingはdevelopment OOFだけで行う
+
+LightGBM / XGBoost / CatBoost、回帰 / ranking / quantile / large-loss、feature family ablation、Optuna、ensemble weight、
+uncertainty calibrationはpurged expanding developmentだけで比較する。各horizonの前半をhyperparameter tuning専用、後半を
+outer model evaluation OOF専用にし、outer targetが自身のmodel parameter選択へ入らないようにする。outer OOFはさらに時系列順に
+stacking weight fit、uncertainty calibration、reported metric / coverage評価の3区間へ分離し、各境界をlabel endpointでpurgeする。
+Decision互換の逐次uncertainty更新は、予測as-ofより前にlabelが成熟したresidualだけを使う。locked final holdoutはGoal 3 report APIへrow indexを返さず、
+model・parameter・feature・ensemble選択へ使用しない。Goal 3 reportはrevision statusにかかわらず`adoption_eligible = false`とし、
+最終holdout評価とlive/full-scale acceptanceを別工程にする。
+
+### D059 — benchmark-excess予測をabsolute returnとしてDecision Engineへ渡さない
+
+TOPIX / sector / beta-residual targetはresearch metricとして比較できるが、cash・cost・taxと比較するDaily Portfolio Decision Engineの
+期待return fieldへそのまま代入しない。Decision Engine互換OOF出力はabsolute-return modelだけから生成する。OOF ensembleは
+日付内rank spaceで非負・総和1 stackingし、その不確実性もrank spaceとして明示する。絶対return幅へのcalibrationはlive OOSで
+別途検証する。
+
+### D060 — Goal 3は認証済みV2 buildと明示的resource boundを必須とする
+
+advanced researchは任意のParquet pathを直接信用せず、V0/V1/V2/Datasetを含む認証済みProduction Build Manifestから開始する。
+Buildはsource lineageだけでなく、共通のobservation as-of・revision policy/statusと、Datasetへ埋め込んだ各feature値のsnapshot一致を必須にする。
+config全文、feature snapshot/definition hash、全Optuna trial、fold結果、選択期間境界、library versionをartifactへ保存する。
+全trialがFAILした場合もtrial監査を例外へ保持し、失敗ExperimentRecordへ永続化する。
+full JPXで一括materializeする推定OOF行数またはmodel fit数が明示上限を超える場合は、未測定のままOOMへ進まず
+`BLOCKED_BY_RESOURCE_CAPABILITY`で停止し、horizon/model-family単位のcontent-addressed batchとして実行する。

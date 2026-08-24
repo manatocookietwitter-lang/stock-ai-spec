@@ -368,8 +368,153 @@ V1_ADDITIONAL_DEFINITIONS = (
 )
 
 
-FEATURE_REGISTRY = FeatureRegistry((*V0_DEFINITIONS, *V1_ADDITIONAL_DEFINITIONS))
+V2_EXTENDED_DEFINITIONS = (
+    _feature(
+        "risk.downside_vol_20d",
+        "volatility",
+        "sqrt(mean(min(return_1d, 0)^2, 20)) * sqrt(252)",
+        21,
+        stage="v2_extended",
+        parameters={"window": 20, "annualization": 252},
+    ),
+    *(
+        _feature(
+            f"risk.max_drawdown_{window}d",
+            "volatility",
+            f"minimum(close / cumulative_max(close) - 1) within trailing {window} rows",
+            window,
+            stage="v2_extended",
+            parameters={"window": window},
+        )
+        for window in (60, 120)
+    ),
+    _feature(
+        "risk.return_skew_60d",
+        "volatility",
+        "sample skew(return_1d, 60)",
+        61,
+        stage="v2_extended",
+        parameters={"window": 60},
+        unit="index",
+    ),
+    _feature(
+        "risk.return_quantile_10_60d",
+        "volatility",
+        "10th percentile(return_1d, 60)",
+        61,
+        stage="v2_extended",
+        parameters={"window": 60, "quantile": 0.10},
+    ),
+    _feature(
+        "volume.zscore_20d",
+        "volume",
+        "(adjusted_volume - mean_20) / sample_std_20",
+        20,
+        stage="v2_extended",
+        inputs=("adjusted_volume",),
+        parameters={"window": 20},
+        unit="zscore",
+    ),
+    _feature(
+        "liquidity.trading_value_ratio_20_60",
+        "liquidity",
+        "mean(trading_value, 20) / mean(trading_value, 60)",
+        60,
+        stage="v2_extended",
+        inputs=("trading_value",),
+    ),
+    _feature(
+        "volume.obv_slope_20d",
+        "money_flow",
+        "(OBV_t - OBV_t-20) / mean(adjusted_volume, 20) / 20",
+        21,
+        stage="v2_extended",
+        inputs=("adjusted_close", "adjusted_volume"),
+    ),
+    _feature(
+        "volume.cmf_20",
+        "money_flow",
+        "sum(((2*close-high-low)/(high-low))*volume,20) / sum(volume,20); "
+        "zero-range multiplier=0; zero-volume window=missing",
+        20,
+        stage="v2_extended",
+        inputs=("adjusted_high", "adjusted_low", "adjusted_close", "adjusted_volume"),
+        parameters={"window": 20},
+    ),
+    *(
+        _feature(
+            name,
+            family,
+            formula,
+            warmup,
+            stage="v2_extended",
+            inputs=("adjusted_open", "adjusted_high", "adjusted_low", "adjusted_close"),
+            unit=unit,
+        )
+        for name, family, formula, warmup, unit in (
+            ("candle.body_pct_close", "candle", "(close-open)/close", 1, "ratio"),
+            (
+                "candle.body_to_range",
+                "candle",
+                "abs(close-open)/(high-low); zero-range=0",
+                1,
+                "ratio",
+            ),
+            (
+                "candle.upper_wick_ratio",
+                "candle",
+                "(high-max(open,close))/(high-low); zero-range=0",
+                1,
+                "ratio",
+            ),
+            (
+                "candle.lower_wick_ratio",
+                "candle",
+                "(min(open,close)-low)/(high-low); zero-range=0",
+                1,
+                "ratio",
+            ),
+            (
+                "candle.close_location",
+                "candle",
+                "(close-low)/(high-low); zero-range=0.5",
+                1,
+                "ratio",
+            ),
+            ("candle.gap_pct", "candle", "open/previous_close-1", 2, "ratio"),
+        )
+    ),
+    *(
+        _feature(
+            f"breakout.{direction}_{window}d_{extreme}",
+            "breakout",
+            formula,
+            window + 1,
+            stage="v2_extended",
+            inputs=("adjusted_high", "adjusted_low", "adjusted_close"),
+            parameters={"window": window},
+            unit="flag",
+        )
+        for window in (20, 60)
+        for direction, extreme, formula in (
+            ("above", "high", f"close > previous rolling {window}d high"),
+            ("below", "low", f"close < previous rolling {window}d low"),
+        )
+    ),
+)
+
+
+FEATURE_REGISTRY = FeatureRegistry(
+    (*V0_DEFINITIONS, *V1_ADDITIONAL_DEFINITIONS, *V2_EXTENDED_DEFINITIONS)
+)
 V0_NAMES = tuple(definition.name for definition in V0_DEFINITIONS)
 V1_CORE_NAMES = (*V0_NAMES, *(definition.name for definition in V1_ADDITIONAL_DEFINITIONS))
+V2_EXTENDED_NAMES = (
+    *V1_CORE_NAMES,
+    *(definition.name for definition in V2_EXTENDED_DEFINITIONS),
+)
 V0_MANIFEST = FEATURE_REGISTRY.manifest("featureset-v0", "1.0.0", V0_NAMES)
 V1_CORE_MANIFEST = FEATURE_REGISTRY.manifest("featureset-v1-core", "1.0.0", V1_CORE_NAMES)
+V2_EXTENDED_MANIFEST = FEATURE_REGISTRY.manifest(
+    "featureset-v2-extended", "2.0.0", V2_EXTENDED_NAMES
+)

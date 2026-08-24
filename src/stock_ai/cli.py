@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -58,29 +60,39 @@ from stock_ai.domain import (
     UserDecisionLine,
     WithholdingMode,
 )
-from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST, FeatureEngine
+from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST, FeatureEngine
 from stock_ai.fixtures import market_fixture, next_business_morning, portfolio_fixture
 from stock_ai.ml import (
+    AdvancedFoldResult,
+    AdvancedResearchConfig,
+    AdvancedResearchExecutionError,
+    AdvancedResearchRun,
     BaselinePredictionBundle,
     ProductionDatasetSnapshot,
     ProductionFeatureSets,
     PurgedExpandingWindowSplitter,
     RidgeRegressor,
+    TrialAudit,
+    TuningSearchError,
     build_production_feature_sets,
     build_production_supervised_dataset,
     build_supervised_dataset,
+    load_advanced_research_run,
     load_production_build_manifest,
     load_production_dataset_snapshot,
     load_production_feature_snapshot,
     reserve_locked_final_holdout,
+    run_advanced_research,
     run_production_walk_forward_baselines,
     walk_forward_validate,
+    write_advanced_research_run,
     write_dataset_snapshot,
     write_production_baseline_report,
     write_production_build_manifest,
     write_production_dataset_snapshot,
     write_production_feature_snapshot,
 )
+from stock_ai.ml.experiments import ExperimentRecord, ExperimentRegistry
 from stock_ai.research import run_research_decision_e2e
 
 app = typer.Typer(
@@ -281,9 +293,7 @@ def data_verify(
     store = ImmutableParquetStore(data_root)
     target_catalog = catalog_path or data_root / "catalog.duckdb"
     try:
-        immutable_manifests = tuple(
-            data_root.glob("*/jquants_v2/*/source_date=*/*/manifest.json")
-        )
+        immutable_manifests = tuple(data_root.glob("*/jquants_v2/*/source_date=*/*/manifest.json"))
         if target_catalog.is_file():
             with DuckDBCatalog(target_catalog) as catalog:
                 verified = catalog.verify_integrity(store, allow_empty=True)
@@ -302,7 +312,12 @@ def data_verify(
         referenced_features = {
             snapshot_path.resolve()
             for build in builds
-            for snapshot_path in (build.v0_parquet_path, build.v1_parquet_path)
+            for snapshot_path in (
+                build.v0_parquet_path,
+                build.v1_parquet_path,
+                build.v2_parquet_path,
+            )
+            if snapshot_path is not None
         }
         referenced_datasets = {build.dataset_parquet_path.resolve() for build in builds}
         if {path.resolve() for path in feature_paths} != referenced_features:
@@ -360,8 +375,10 @@ def _build_production_artifacts(
             revision_policy=revision_policy,
         )
     features = build_production_feature_sets(bundle)
+    if features.v2_extended is None:
+        raise RuntimeError("BLOCKED_BY_DATA_CAPABILITY: V2 Extended features were not built")
     dataset, label_1230_status = build_production_supervised_dataset(
-        features.v1_core,
+        features.v2_extended,
         bundle,
         plan=plan,
     )
@@ -384,6 +401,15 @@ def _build_production_artifacts(
         as_of=source_snapshot_as_of,
         created_at=created_at,
     )
+    v2_snapshot = write_production_feature_snapshot(
+        features.v2_extended,
+        data_root / "features" / V2_EXTENDED_MANIFEST.feature_set_version,
+        manifest=V2_EXTENDED_MANIFEST,
+        source_snapshot_as_of=source_snapshot_as_of,
+        source_snapshot_ids=bundle.source_snapshot_ids,
+        as_of=source_snapshot_as_of,
+        created_at=created_at,
+    )
     snapshot = write_production_dataset_snapshot(
         dataset,
         data_root / "datasets" / "production",
@@ -392,10 +418,12 @@ def _build_production_artifacts(
         as_of=source_snapshot_as_of,
         created_at=created_at,
         label_1230_status=label_1230_status,
+        manifests=(V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST),
     )
     write_production_build_manifest(
         v0_snapshot,
         v1_snapshot,
+        v2_snapshot,
         snapshot,
         data_root / "builds" / "production",
         created_at=created_at,
@@ -452,8 +480,10 @@ def research_build(
     except (ValueError, RuntimeError) as exc:
         typer.echo(f"production build blocked: {exc}", err=True)
         raise typer.Exit(code=2) from None
+    v2_rows = 0 if artifacts.features.v2_extended is None else len(artifacts.features.v2_extended)
     typer.echo(
         f"v0_rows={len(artifacts.features.v0)} v1_rows={len(artifacts.features.v1_core)} "
+        f"v2_rows={v2_rows} "
         f"dataset={artifacts.snapshot.snapshot_id} rows={artifacts.snapshot.rows} "
         f"period={artifacts.snapshot.data_start}..{artifacts.snapshot.data_end} "
         f"label_1230={artifacts.snapshot.label_1230_status.value}"
@@ -486,15 +516,411 @@ def research_baseline(
     except (ValueError, RuntimeError) as exc:
         typer.echo(f"baseline blocked: {exc}", err=True)
         raise typer.Exit(code=2) from None
-    typer.echo(
-        f"report={report.report_id} holdout_start={report.locked_holdout_start} path={path}"
-    )
+    typer.echo(f"report={report.report_id} holdout_start={report.locked_holdout_start} path={path}")
     for model in report.models:
         rank_ic = "NA" if model.mean_daily_rank_ic is None else f"{model.mean_daily_rank_ic:.6f}"
         typer.echo(
             f"model={model.model_name} folds={model.folds} mse={model.mean_squared_error:.8f} "
             f"rank_ic={rank_ic} rank_dates={model.rank_ic_dates}"
         )
+
+
+@research_app.command("advanced")
+def research_advanced(
+    build_manifest: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Authenticated V0/V1/V2/Dataset Production Build Manifest.",
+        ),
+    ],
+    code_commit: Annotated[str, typer.Option(help="Exact source commit for audit provenance.")],
+    report_root: Annotated[
+        Path,
+        typer.Option(help="Content-addressed Goal 3 report root."),
+    ] = Path("artifacts/reports/advanced"),
+    target_family: Annotated[
+        str,
+        typer.Option(help="return, topix_excess, sector_excess, or beta_residual."),
+    ] = "return",
+    horizons: Annotated[
+        str,
+        typer.Option(help="Comma-separated subset of 1,5,20."),
+    ] = "5",
+    model_families: Annotated[
+        str,
+        typer.Option(help="Comma-separated lightgbm,xgboost,catboost."),
+    ] = "lightgbm",
+    seeds: Annotated[
+        str,
+        typer.Option(help="Comma-separated deterministic seeds."),
+    ] = "17",
+    tuning_trials: Annotated[
+        int,
+        typer.Option(min=1, max=100, help="Hard bound on Optuna trials per model/horizon."),
+    ] = 20,
+    tuning_timeout_seconds: Annotated[
+        int,
+        typer.Option(min=10, max=7200, help="Hard tuning timeout per model/horizon."),
+    ] = 900,
+    estimator_count: Annotated[
+        int,
+        typer.Option(min=5, max=2000, help="Bounded boosting iterations."),
+    ] = 300,
+    initial_train_periods: Annotated[
+        int,
+        typer.Option(min=20, help="Initial expanding training sessions."),
+    ] = 500,
+    validation_periods: Annotated[
+        int,
+        typer.Option(min=1, help="Validation sessions per fold."),
+    ] = 60,
+    step_periods: Annotated[
+        int,
+        typer.Option(min=1, help="Walk-forward step sessions."),
+    ] = 60,
+    holdout_periods: Annotated[
+        int,
+        typer.Option(min=1, help="Locked final holdout sessions."),
+    ] = 120,
+    run_ablations: Annotated[
+        bool,
+        typer.Option(help="Run chronological incremental feature-family ablations."),
+    ] = True,
+    run_diagnostics: Annotated[
+        bool,
+        typer.Option(help="Run OOS permutation diagnostics."),
+    ] = True,
+    max_materialized_oof_rows: Annotated[
+        int,
+        typer.Option(min=1000, help="Fail-closed bound for in-memory OOF rows."),
+    ] = 5_000_000,
+    max_model_fits: Annotated[
+        int,
+        typer.Option(min=10, help="Fail-closed bound for total boosting fits."),
+    ] = 5_000,
+    experiment_registry: Annotated[
+        Path,
+        typer.Option(help="Append-only success/failure experiment registry."),
+    ] = Path("artifacts/experiments/advanced.jsonl"),
+) -> None:
+    """Run leakage-safe GBDT/LTR/downside/OOF research; never open the holdout."""
+
+    created_at = datetime.now(UTC)
+    config: AdvancedResearchConfig | None = None
+    snapshot: ProductionDatasetSnapshot | None = None
+    run: AdvancedResearchRun | None = None
+    authenticated_build_id: str | None = None
+    authenticated_feature_snapshot_id: str | None = None
+    raw_config: dict[str, object] = {
+        "horizons": horizons,
+        "target_family": target_family,
+        "model_families": model_families,
+        "seeds": seeds,
+        "tuning_trials": tuning_trials,
+        "tuning_timeout_seconds": tuning_timeout_seconds,
+        "estimator_count": estimator_count,
+        "initial_train_periods": initial_train_periods,
+        "validation_periods": validation_periods,
+        "step_periods": step_periods,
+        "holdout_periods": holdout_periods,
+        "run_ablations": run_ablations,
+        "run_diagnostics": run_diagnostics,
+        "max_materialized_oof_rows": max_materialized_oof_rows,
+        "max_model_fits": max_model_fits,
+    }
+    try:
+        config = AdvancedResearchConfig.model_validate(
+            {
+                "horizons": tuple(
+                    int(value.strip()) for value in horizons.split(",") if value.strip()
+                ),
+                "target_family": target_family,
+                "model_families": tuple(
+                    value.strip() for value in model_families.split(",") if value.strip()
+                ),
+                "seeds": tuple(int(value.strip()) for value in seeds.split(",") if value.strip()),
+                "tuning_trials": tuning_trials,
+                "tuning_timeout_seconds": tuning_timeout_seconds,
+                "estimator_count": estimator_count,
+                "initial_train_periods": initial_train_periods,
+                "validation_periods": validation_periods,
+                "step_periods": step_periods,
+                "holdout_periods": holdout_periods,
+                "run_ablations": run_ablations,
+                "run_diagnostics": run_diagnostics,
+                "max_materialized_oof_rows": max_materialized_oof_rows,
+                "max_model_fits": max_model_fits,
+            }
+        )
+        build = load_production_build_manifest(build_manifest)
+        authenticated_build_id = build.build_id
+        snapshot, dataset = load_production_dataset_snapshot(build.dataset_parquet_path)
+        v2_snapshot, _ = load_production_feature_snapshot(build.v2_parquet_path)
+        authenticated_feature_snapshot_id = v2_snapshot.snapshot_id
+        run = run_advanced_research(
+            dataset,
+            data_snapshot_id=snapshot.snapshot_id,
+            created_at=created_at,
+            code_commit=code_commit,
+            config=config,
+            feature_snapshot_id=v2_snapshot.snapshot_id,
+            feature_manifest_hash=v2_snapshot.manifest_hash,
+        )
+        metadata_path, oof_path = write_advanced_research_run(run, report_root)
+        # Read through the authenticated boundary before declaring publication complete.
+        load_advanced_research_run(oof_path)
+        ExperimentRegistry(experiment_registry).append(
+            _advanced_experiment_record(
+                run,
+                experiment_id=f"advanced-{uuid4()}",
+                build_id=build.build_id,
+                metadata_path=metadata_path,
+                oof_path=oof_path,
+            )
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        execution_error = (
+            exc if isinstance(exc, AdvancedResearchExecutionError) else None
+        )
+        completed_trial_contexts = (
+            tuple(
+                (tuning.horizon, tuning.model_family, trial)
+                for tuning in run.report.tuning_results
+                for trial in tuning.trials
+            )
+            if run is not None
+            else ()
+        )
+        ExperimentRegistry(experiment_registry).append(
+            _failed_advanced_experiment_record(
+                experiment_id=f"advanced-{uuid4()}",
+                created_at=created_at,
+                code_commit=code_commit,
+                config=config,
+                raw_config=raw_config,
+                data_snapshot_id=(
+                    snapshot.snapshot_id
+                    if snapshot is not None
+                    else f"UNVERIFIED_BUILD:{build_manifest.stem}"
+                ),
+                reason=f"{type(exc).__name__}: {str(exc)[:500]}",
+                trial_contexts=(
+                    execution_error.trial_contexts
+                    if execution_error is not None
+                    else (
+                        completed_trial_contexts
+                        or (exc.trial_contexts if isinstance(exc, TuningSearchError) else ())
+                    )
+                ),
+                fold_results=(
+                    execution_error.fold_results
+                    if execution_error is not None
+                    else (run.report.fold_results if run is not None else ())
+                ),
+                build_id=authenticated_build_id,
+                feature_snapshot_id=authenticated_feature_snapshot_id,
+                report_id=(run.report.report_id if run is not None else None),
+            )
+        )
+        typer.echo(f"advanced research blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    assert run is not None
+    typer.echo(
+        f"report={run.report.report_id} oof_rows={run.report.oof_rows} "
+        f"holdout_start={run.report.locked_holdout_start} "
+        f"adoption_eligible={str(run.report.adoption_eligible).lower()} "
+        f"metadata={metadata_path} oof={oof_path}"
+    )
+
+
+def _advanced_experiment_record(
+    run: AdvancedResearchRun,
+    *,
+    experiment_id: str,
+    build_id: str,
+    metadata_path: Path,
+    oof_path: Path,
+) -> ExperimentRecord:
+    report = run.report
+    return ExperimentRecord(
+        experiment_id=experiment_id,
+        created_at=report.created_at,
+        hypothesis=report.hypothesis,
+        data_snapshot_id=report.data_snapshot_id,
+        feature_set_version=report.feature_set_version,
+        preprocessing_version=report.preprocessing_version,
+        feature_definition_hashes=report.feature_definition_hashes,
+        code_commit=report.code_commit,
+        config_hash=report.config_hash,
+        model_type="advanced_gbdt_ltr_downside_oof",
+        parameters={
+            "target_family": report.prediction_semantics,
+            "horizons": ",".join(str(value) for value in report.config.horizons),
+            "model_families": ",".join(report.config.model_families),
+            "seeds": ",".join(str(value) for value in report.config.seeds),
+            "estimator_count": report.config.estimator_count,
+            "config_json": json.dumps(
+                report.config.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ),
+            "report_id": report.report_id,
+            "report_metadata_path": str(metadata_path.resolve()),
+            "oof_path": str(oof_path.resolve()),
+            "build_id": build_id,
+            "feature_snapshot_id": report.feature_snapshot_id,
+            "tax_policy_version": report.tax_policy_version,
+            "decision_engine_version": report.decision_engine_version,
+            "cost_scenarios_bps": ",".join(
+                str(value) for value in report.cost_scenarios_bps
+            ),
+        },
+        seed=None,
+        fold_results=tuple(_fold_audit_row(fold) for fold in report.fold_results),
+        trial_results=tuple(
+            _trial_audit_row(
+                trial,
+                horizon=tuning.horizon,
+                model_family=tuning.model_family,
+            )
+            for tuning in report.tuning_results
+            for trial in tuning.trials
+        ),
+        aggregate_results={
+            "oof_rows": report.oof_rows,
+            "adoption_eligible": str(report.adoption_eligible).lower(),
+            "cost_evaluation_status": report.cost_evaluation_status.value,
+            "historical_revision_policy": report.historical_revision_policy,
+            "historical_revision_status": report.historical_revision_status.value,
+            "adoption_blocking_reasons": " | ".join(report.adoption_blocking_reasons),
+        },
+        decision="research_only",
+        rejection_reason=None,
+        locked_holdout_accessed=False,
+    )
+
+
+def _failed_advanced_experiment_record(
+    *,
+    experiment_id: str,
+    created_at: datetime,
+    code_commit: str,
+    config: AdvancedResearchConfig | None,
+    raw_config: Mapping[str, object],
+    data_snapshot_id: str,
+    reason: str,
+    trial_contexts: tuple[tuple[int, str, TrialAudit], ...] = (),
+    fold_results: tuple[AdvancedFoldResult, ...] = (),
+    build_id: str | None = None,
+    feature_snapshot_id: str | None = None,
+    report_id: str | None = None,
+) -> ExperimentRecord:
+    serialized_raw_config = json.dumps(
+        dict(raw_config), sort_keys=True, separators=(",", ":"), default=str
+    )
+    config_hash = (
+        config.config_hash
+        if config is not None
+        else hashlib.sha256(serialized_raw_config.encode()).hexdigest()
+    )
+    return ExperimentRecord(
+        experiment_id=experiment_id,
+        created_at=created_at,
+        hypothesis=(
+            config.hypothesis
+            if config is not None
+            else "Advanced research command should complete under the declared configuration"
+        ),
+        data_snapshot_id=data_snapshot_id,
+        feature_set_version=V2_EXTENDED_MANIFEST.feature_set_version,
+        preprocessing_version=V2_EXTENDED_MANIFEST.preprocessing_version,
+        feature_definition_hashes=V2_EXTENDED_MANIFEST.feature_definition_hashes,
+        code_commit=code_commit.strip() or "UNSET",
+        config_hash=config_hash,
+        model_type="advanced_gbdt_ltr_downside_oof",
+        parameters={
+            "raw_config_json": serialized_raw_config,
+            **({"build_id": build_id} if build_id is not None else {}),
+            **(
+                {"feature_snapshot_id": feature_snapshot_id}
+                if feature_snapshot_id is not None
+                else {}
+            ),
+            **({"report_id": report_id} if report_id is not None else {}),
+            **(
+                {
+                    "target_family": config.target_family,
+                    "horizons": ",".join(str(value) for value in config.horizons),
+                    "model_families": ",".join(config.model_families),
+                    "seeds": ",".join(str(value) for value in config.seeds),
+                    "estimator_count": config.estimator_count,
+                }
+                if config is not None
+                else {}
+            ),
+        },
+        seed=None,
+        fold_results=tuple(_fold_audit_row(fold) for fold in fold_results),
+        trial_results=tuple(
+            _trial_audit_row(
+                trial,
+                horizon=horizon,
+                model_family=model_family,
+            )
+            for horizon, model_family, trial in trial_contexts
+        ),
+        aggregate_results={"status": "FAILED"},
+        decision="rejected",
+        rejection_reason=reason,
+        locked_holdout_accessed=False,
+    )
+
+
+def _fold_audit_row(fold: AdvancedFoldResult) -> dict[str, int | float | str]:
+    return {
+        "horizon": fold.horizon,
+        "fold": fold.fold,
+        "model_family": fold.model_family,
+        "task": fold.task,
+        "seed": fold.seed,
+        "validation_start": fold.validation_start,
+        "validation_end": fold.validation_end,
+        "rows": fold.rows,
+        "mean_squared_error": fold.mean_squared_error,
+        **(
+            {"mean_daily_rank_ic": fold.mean_daily_rank_ic}
+            if fold.mean_daily_rank_ic is not None
+            else {}
+        ),
+    }
+
+
+def _trial_audit_row(
+    trial: TrialAudit,
+    *,
+    horizon: int | None,
+    model_family: str | None,
+) -> dict[str, int | float | str]:
+    return {
+        **({"horizon": horizon} if horizon is not None else {}),
+        **({"model_family": model_family} if model_family is not None else {}),
+        "number": trial.number,
+        "state": trial.state,
+        "parameters": json.dumps(
+            dict(trial.parameters), sort_keys=True, separators=(",", ":")
+        ),
+        **({"value": trial.value} if trial.value is not None else {}),
+        **(
+            {"duration_seconds": trial.duration_seconds}
+            if trial.duration_seconds is not None
+            else {}
+        ),
+        **(
+            {"failure_reason": trial.failure_reason}
+            if trial.failure_reason is not None
+            else {}
+        ),
+    }
 
 
 @research_app.command("e2e")
@@ -622,9 +1048,7 @@ def research_e2e(
             "is_order_instruction": False,
             "proposal": decision.proposal.model_dump(mode="json"),
         }
-        proposal_payload = (
-            json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        )
+        proposal_payload = json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         if proposal_path.exists():
             if proposal_path.read_text(encoding="utf-8") != proposal_payload:
                 raise RuntimeError("existing research proposal identity collision")

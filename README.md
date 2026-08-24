@@ -1,7 +1,7 @@
 # Stock AI Decision Support — Specification Bundle
 
-更新日: 2026-08-22  
-状態: Goal 2A J-Quants V2実データ基盤実装済み
+更新日: 2026-08-24
+状態: Goal 3本格ML研究基盤実装済み（live履歴runはcredential継承待ち）
 
 ## このリポジトリの目的
 
@@ -146,18 +146,28 @@ stock-ai data sync --date 2026-08-21 --plan free --data-root data
 stock-ai data history --start 2017-01-04 --end 2026-08-21 --plan standard --data-root data
 stock-ai data verify --data-root data
 stock-ai research build --as-of 2026-08-24T11:30:00+09:00 --plan standard --data-root data
+stock-ai research baseline --dataset-parquet <content-addressed-parquet> --code-commit <commit>
+stock-ai research advanced --build-manifest <production-build-manifest.json> --code-commit <commit>
 ```
 
 Free planの既定取得は銘柄master、株価日足、財務summary。Light以上の営業日calendarとTOPIXは`--datasets`で明示する。live取得はprocess環境の`JQUANTS_API_KEY`がない場合に停止し、fixtureへfallbackしない。
 
-株価はexecution参照用raw系列とresearch用調整系列を分け、同じpayloadの再取得は重複させない。訂正値は新versionとして残す。APIが過去訂正時刻を返さないためsource objectは`available_at = received_at`とし、初回取得より前の時点へbackfill値を遡及させない。as-revised単一vintageは研究専用かつ採用不可として明示し、V0/V1/Datasetはsource-frame ID付きのatomic Build Manifestで固定する。詳細は`docs/JQUANTS_V2_RUNBOOK.md`を参照する。
+株価はexecution参照用raw系列とresearch用調整系列を分け、同じpayloadの再取得は重複させない。訂正値は新versionとして残す。APIが過去訂正時刻を返さないためsource objectは`available_at = received_at`とし、初回取得より前の時点へbackfill値を遡及させない。as-revised単一vintageは研究専用かつ採用不可として明示し、V0/V1/V2/Datasetはsource-frame ID付きのatomic Build Manifestで固定する。詳細は`docs/JQUANTS_V2_RUNBOOK.md`を参照する。
+
+## Goal 3 本格ML研究基盤
+
+FeatureSet V2 Extendedと、LightGBM / XGBoost / CatBoostの回帰・Learning to Rank、
+1/5/20日、quantile / large-loss、bounded Optuna、feature-family ablation、OOF ensemble、
+uncertainty calibrationを実装した。hyperparameter選択はstrictly earlier tuning期間、model評価は後続outer OOF、
+stacking・uncertainty calibration・reported coverageはさらに3つの時系列区間へ分離する。
+locked final holdoutは開かない。`research advanced`の成果物は常にresearch-onlyで、実注文を生成しない。
 
 ## 現在のパッケージ構成
 
 - `src/stock_ai/domain`: 口座、保有、予測、提案、ユーザー判断、実約定の不変型
 - `src/stock_ai/data`: J-Quants V2 client、品質検証、immutable Parquet、DuckDB、PIT読取
-- `src/stock_ai/features`: Feature Registry、V0/V1 manifest、指標計算
-- `src/stock_ai/ml`: dataset snapshot、1/5/20日label、Momentum/Ridge、時系列検証、実験記録
+- `src/stock_ai/features`: Feature Registry、V0/V1/V2 manifest、指標計算
+- `src/stock_ai/ml`: dataset snapshot、1/5/20日label、GBDT/LTR/downside、OOF ensemble、時系列検証、実験記録
 - `src/stock_ai/decision`: コスト、税、全体ポートフォリオ比較、状態遷移
 - `tests`: 外部API不要の決定的fixtureテスト
 

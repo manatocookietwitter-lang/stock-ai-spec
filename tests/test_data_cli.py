@@ -115,9 +115,7 @@ def test_data_sync_and_history_success_orchestration(
     )
     monkeypatch.setattr(
         "stock_ai.cli.JQuantsV2HistoryIngestor",
-        lambda **_kwargs: SimpleNamespace(
-            sync_history=lambda *_args, **_kwargs2: history_result
-        ),
+        lambda **_kwargs: SimpleNamespace(sync_history=lambda *_args, **_kwargs2: history_result),
     )
     history = runner.invoke(
         app,
@@ -144,6 +142,13 @@ def test_research_cli_orchestration_never_creates_an_order(
     features = SimpleNamespace(
         v0=pd.DataFrame({"row": [1]}),
         v1_core=pd.DataFrame(
+            {
+                "symbol": ["7203"],
+                "trading_date": [pd.Timestamp("2026-08-22")],
+                "available_at": [cutoff],
+            }
+        ),
+        v2_extended=pd.DataFrame(
             {
                 "symbol": ["7203"],
                 "trading_date": [pd.Timestamp("2026-08-22")],

@@ -142,7 +142,7 @@ normalized publish前に次を検証する。
 stock-ai data verify --data-root data
 ```
 
-catalogと全manifest/Parquet hash/row数/object ID、成功Bulk checkpoint、V0/V1/Dataset、最終Build Manifestを相互照合する。
+catalogと全manifest/Parquet hash/row数/object ID、成功Bulk checkpoint、V0/V1/V2/Dataset、最終Build Manifestを相互照合する。
 不完全object、orphan snapshot、partial build、path/identity/hash/row数不一致、空storeは非zeroで停止する。新規の空storeを
 意図的に確認する場合だけ`--allow-empty`を付ける。
 
@@ -152,10 +152,13 @@ Production Research artifactは次で生成・検証する。
 stock-ai research build --as-of 2026-08-24T11:30:00+09:00 --plan standard --data-root data
 stock-ai data verify --data-root data
 stock-ai research baseline --dataset-parquet <content-addressed-parquet> --code-commit <git-commit>
+stock-ai research advanced --build-manifest <production-build-manifest.json> --code-commit <git-commit>
 stock-ai research e2e --as-of 2026-08-24T11:30:00+09:00 --code-commit <git-commit> --plan standard
 ```
 
-baselineは隣接metadata、Parquet hash、content ID、source lineageを再検証する。任意にrenameしたParquetは受け付けない。
+baselineは隣接metadata、Parquet hash、content ID、source lineageを再検証する。advanced researchはさらに
+V0/V1/V2/Datasetの最終Build Manifestを入口にし、認証済みV2 snapshotとdatasetの同一lineageを必須とする。
+任意にrenameしたParquetは受け付けない。
 
 ## 障害時
 

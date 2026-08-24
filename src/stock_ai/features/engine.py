@@ -1,4 +1,4 @@
-"""Causal FeatureSet V0/V1 Core calculation over completed daily bars."""
+"""Causal staged feature calculation over completed daily bars."""
 
 from __future__ import annotations
 
@@ -95,6 +95,11 @@ def _compute_symbol(group: pd.DataFrame) -> pd.DataFrame:
 def _compute_contiguous_symbol(group: pd.DataFrame) -> pd.DataFrame:
     group = group.sort_values("trading_date").copy()
     close = group["adjusted_close"].astype(float)
+    adjusted_open = (
+        group["adjusted_open"].astype(float)
+        if "adjusted_open" in group
+        else pd.Series(np.nan, index=group.index, dtype=float)
+    )
     high = group["adjusted_high"].astype(float)
     low = group["adjusted_low"].astype(float)
     volume = group["adjusted_volume"].astype(float)
@@ -103,6 +108,7 @@ def _compute_contiguous_symbol(group: pd.DataFrame) -> pd.DataFrame:
     output = group[["symbol", "sector", "trading_date", "available_at"]].copy()
     output["close"] = group["close"].astype(float)
     output["adjusted_close"] = close
+    output["adjusted_open"] = adjusted_open
     one_day_return = close.pct_change(fill_method=None)
     output["__return_1d"] = one_day_return
     for window in (1, 5, 20, 60, 120):
@@ -166,11 +172,72 @@ def _compute_contiguous_symbol(group: pd.DataFrame) -> pd.DataFrame:
     turnover = volume / shares
     output["liquidity.turnover_20d"] = turnover.rolling(20, min_periods=20).mean()
     on_balance_volume = obv(close, volume)
+    normalized_volume_mean_20 = volume_mean_20.mask(volume_mean_20 == 0)
     output["volume.obv_slope_5d"] = (
-        (on_balance_volume - on_balance_volume.shift(5)) / volume_mean_20 / 5
+        (on_balance_volume - on_balance_volume.shift(5)) / normalized_volume_mean_20 / 5
     )
     output["volume.mfi_14"] = mfi(high, low, close, volume, 14)
+
+    negative_return = one_day_return.clip(upper=0.0)
+    output["risk.downside_vol_20d"] = negative_return.pow(2).rolling(20, min_periods=20).mean().pow(
+        0.5
+    ) * np.sqrt(252)
+    for window in (60, 120):
+        output[f"risk.max_drawdown_{window}d"] = close.rolling(window, min_periods=window).apply(
+            _maximum_drawdown, raw=True
+        )
+    output["risk.return_skew_60d"] = one_day_return.rolling(60, min_periods=60).skew()
+    output["risk.return_quantile_10_60d"] = one_day_return.rolling(60, min_periods=60).quantile(
+        0.10
+    )
+    volume_std_20 = volume.rolling(20, min_periods=20).std(ddof=1)
+    output["volume.zscore_20d"] = (volume - volume_mean_20) / volume_std_20
+    output["liquidity.trading_value_ratio_20_60"] = (
+        trading_value.rolling(20, min_periods=20).mean()
+        / trading_value.rolling(60, min_periods=60).mean()
+    )
+    output["volume.obv_slope_20d"] = (
+        (on_balance_volume - on_balance_volume.shift(20)) / normalized_volume_mean_20 / 20
+    )
+    price_range = high - low
+    money_flow_multiplier = (2 * close - high - low) / price_range
+    money_flow_multiplier = money_flow_multiplier.mask(price_range == 0, 0.0)
+    cmf_denominator = volume.rolling(20, min_periods=20).sum()
+    output["volume.cmf_20"] = (money_flow_multiplier * volume).rolling(
+        20, min_periods=20
+    ).sum() / cmf_denominator.mask(cmf_denominator == 0)
+    output["candle.body_pct_close"] = (close - adjusted_open) / close
+    nonzero_range = price_range.mask(price_range == 0)
+    output["candle.body_to_range"] = (
+        (close - adjusted_open).abs() / nonzero_range
+    ).mask(price_range == 0, 0.0)
+    output["candle.upper_wick_ratio"] = (
+        high - pd.concat([adjusted_open, close], axis=1).max(axis=1)
+    ) / nonzero_range
+    output["candle.upper_wick_ratio"] = output["candle.upper_wick_ratio"].mask(
+        price_range == 0, 0.0
+    )
+    output["candle.lower_wick_ratio"] = (
+        pd.concat([adjusted_open, close], axis=1).min(axis=1) - low
+    ) / nonzero_range
+    output["candle.lower_wick_ratio"] = output["candle.lower_wick_ratio"].mask(
+        price_range == 0, 0.0
+    )
+    output["candle.close_location"] = ((close - low) / nonzero_range).mask(
+        price_range == 0, 0.5
+    )
+    output["candle.gap_pct"] = adjusted_open / close.shift(1) - 1
+    for window in (20, 60):
+        prior_high = high.shift(1).rolling(window, min_periods=window).max()
+        prior_low = low.shift(1).rolling(window, min_periods=window).min()
+        output[f"breakout.above_{window}d_high"] = (close > prior_high).where(prior_high.notna())
+        output[f"breakout.below_{window}d_low"] = (close < prior_low).where(prior_low.notna())
     return output
+
+
+def _maximum_drawdown(values: np.ndarray) -> float:
+    peaks = np.maximum.accumulate(values)
+    return float(np.min(values / peaks - 1.0))
 
 
 def _merge_financials(features: pd.DataFrame, financials: pd.DataFrame | None) -> pd.DataFrame:
@@ -263,6 +330,11 @@ class FeatureEngine:
             raise ValueError(
                 "BLOCKED_BY_DATA_CAPABILITY: V1 turnover requires shares_outstanding history"
             )
+        requires_open = any(name.startswith("candle.") for name in self.manifest.feature_names)
+        if requires_open and "adjusted_open" not in safe_daily:
+            raise ValueError(
+                "BLOCKED_BY_DATA_CAPABILITY: V2 candle features require adjusted open history"
+            )
         daily_numeric = (
             "adjusted_high",
             "adjusted_low",
@@ -272,6 +344,8 @@ class FeatureEngine:
             "trading_value",
         )
         _require_finite_numeric(safe_daily, daily_numeric, "daily market data")
+        if "adjusted_open" in safe_daily:
+            _require_finite_numeric(safe_daily, ("adjusted_open",), "daily market data")
         if "shares_outstanding" in safe_daily:
             _require_finite_numeric(
                 safe_daily,
@@ -286,12 +360,14 @@ class FeatureEngine:
                 raise ValueError(
                     "BLOCKED_BY_DATA_CAPABILITY: no point-in-time shares outstanding are available"
                 )
-        positive_columns = (
+        positive_columns: tuple[str, ...] = (
             "adjusted_high",
             "adjusted_low",
             "adjusted_close",
             "close",
         )
+        if "adjusted_open" in safe_daily:
+            positive_columns = (*positive_columns, "adjusted_open")
         if any((pd.to_numeric(safe_daily[column]) <= 0).any() for column in positive_columns):
             raise ValueError("daily prices and shares outstanding must be strictly positive")
         if (
@@ -410,7 +486,11 @@ class FeatureEngine:
             raise RuntimeError(
                 f"feature implementation is missing manifest columns: {missing_outputs}"
             )
-        return computed[selected].sort_values(["trading_date", "symbol"]).reset_index(drop=True)
+        result = computed[selected].sort_values(["trading_date", "symbol"]).reset_index(drop=True)
+        result.loc[:, list(self.manifest.feature_names)] = result.loc[
+            :, list(self.manifest.feature_names)
+        ].replace([np.inf, -np.inf], np.nan)
+        return result
 
     def latest_snapshot(
         self,

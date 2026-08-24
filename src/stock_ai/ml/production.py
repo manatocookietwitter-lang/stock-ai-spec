@@ -24,7 +24,7 @@ from stock_ai.data.contracts import (
     SubscriptionPlan,
 )
 from stock_ai.data.production import ProductionDataBundle
-from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST, FeatureEngine
+from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST, FeatureEngine
 from stock_ai.features.registry import FeatureSetManifest
 from stock_ai.ml.dataset import HORIZONS
 from stock_ai.ml.models import MomentumRegressor, Regressor, RidgeRegressor
@@ -35,6 +35,7 @@ from stock_ai.ml.validation import PurgedExpandingWindowSplitter, reserve_locked
 class ProductionFeatureSets:
     v0: pd.DataFrame
     v1_core: pd.DataFrame
+    v2_extended: pd.DataFrame | None = None
 
 
 class ProductionDatasetSnapshot(BaseModel):
@@ -90,7 +91,7 @@ class ProductionFeatureSnapshot(BaseModel):
 
 
 class ProductionBuildManifest(BaseModel):
-    """Atomic publication marker for a complete V0/V1/Dataset production build."""
+    """Atomic publication marker for a complete V0/V1/V2/Dataset production build."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
@@ -100,9 +101,11 @@ class ProductionBuildManifest(BaseModel):
     source_snapshot_ids: tuple[tuple[str, str], ...]
     v0_snapshot_id: str = Field(min_length=64, max_length=64)
     v1_snapshot_id: str = Field(min_length=64, max_length=64)
+    v2_snapshot_id: str = Field(min_length=64, max_length=64)
     dataset_snapshot_id: str = Field(min_length=64, max_length=64)
     v0_parquet_path: Path
     v1_parquet_path: Path
+    v2_parquet_path: Path
     dataset_parquet_path: Path
     manifest_path: Path
 
@@ -159,21 +162,29 @@ def build_production_feature_sets(bundle: ProductionDataBundle) -> ProductionFea
     _assert_financial_timing(bundle.financials)
     incomplete_market = ~bundle.market_context["coverage_complete"].astype(bool)
     if incomplete_market.any():
-        first = pd.to_datetime(
-            bundle.market_context.loc[incomplete_market, "trading_date"]
-        ).min()
+        first = pd.to_datetime(bundle.market_context.loc[incomplete_market, "trading_date"]).min()
         raise ValueError(
             "BLOCKED_BY_DATA_CAPABILITY: market breadth coverage is below the configured "
             f"threshold on {first.date()}"
         )
-    v1 = FeatureEngine(V1_CORE_MANIFEST).transform(
+    v2 = FeatureEngine(V2_EXTENDED_MANIFEST).transform(
         bundle.daily,
         bundle.market_context,
         bundle.sector_context,
         financials=bundle.financials,
     )
-    # V1 is a strict superset of V0. Projecting the shared result avoids a second full-JPX
-    # feature pass and guarantees identical shared observations by construction.
+    # V2 is a strict superset. Projecting one shared pass guarantees identical observations.
+    v1 = v2[
+        [
+            "symbol",
+            "sector",
+            "trading_date",
+            "available_at",
+            "close",
+            "adjusted_close",
+            *V1_CORE_MANIFEST.feature_names,
+        ]
+    ].copy()
     v0 = v1[
         [
             "symbol",
@@ -203,15 +214,13 @@ def build_production_feature_sets(bundle: ProductionDataBundle) -> ProductionFea
     sector_lineage = bundle.sector_context[
         ["sector", "trading_date", "revision_available_at"]
     ].rename(columns={"revision_available_at": "sector_revision_available_at"})
-    daily_lineage = bundle.daily[
-        ["symbol", "trading_date", "revision_available_at"]
-    ].rename(columns={"revision_available_at": "daily_revision_available_at"})
+    daily_lineage = bundle.daily[["symbol", "trading_date", "revision_available_at"]].rename(
+        columns={"revision_available_at": "daily_revision_available_at"}
+    )
     financial_lineage = bundle.financials[
         ["symbol", "trading_date", "financial_revision_available_at"]
     ]
-    master_lineage = bundle.universe[
-        ["symbol", "effective_date", "revision_available_at"]
-    ].rename(
+    master_lineage = bundle.universe[["symbol", "effective_date", "revision_available_at"]].rename(
         columns={
             "effective_date": "trading_date",
             "revision_available_at": "master_revision_available_at",
@@ -225,11 +234,12 @@ def build_production_feature_sets(bundle: ProductionDataBundle) -> ProductionFea
             "shares_outstanding_missing_reason",
         ]
     ].copy()
-    for frame in (v0, v1):
+    for frame in (v0, v1, v2):
         frame["source_snapshot_as_of"] = pd.Timestamp(bundle.source_snapshot_as_of)
     v0 = v0.merge(audit, on="trading_date", how="left", validate="many_to_one")
     v1 = v1.merge(audit, on="trading_date", how="left", validate="many_to_one")
-    for name, frame in (("v0", v0), ("v1", v1)):
+    v2 = v2.merge(audit, on="trading_date", how="left", validate="many_to_one")
+    for name, frame in (("v0", v0), ("v1", v1), ("v2", v2)):
         frame = frame.merge(
             sector_lineage,
             on=["sector", "trading_date"],
@@ -263,26 +273,41 @@ def build_production_feature_sets(bundle: ProductionDataBundle) -> ProductionFea
         ]
         frame["source_revision_available_at"] = frame[revision_columns].max(axis=1)
         if bundle.revision_policy is HistoricalRevisionPolicy.STRICT_AS_KNOWN:
-            frame["available_at"] = frame[
-                ["available_at", "source_revision_available_at"]
-            ].max(axis=1)
+            frame["available_at"] = frame[["available_at", "source_revision_available_at"]].max(
+                axis=1
+            )
         frame["historical_revision_policy"] = bundle.revision_policy.value
         frame["historical_revision_status"] = bundle.historical_revision_status.value
         if name == "v0":
             v0 = frame
-        else:
+        elif name == "v1":
             v1 = frame
-    v1 = v1.merge(shares, on=["symbol", "trading_date"], how="left", validate="one_to_one")
-    v1["shares_outstanding_is_missing"] = v1["shares_outstanding"].isna()
+        else:
+            v2 = frame
+    for name, frame in (("v1", v1), ("v2", v2)):
+        frame = frame.merge(
+            shares,
+            on=["symbol", "trading_date"],
+            how="left",
+            validate="one_to_one",
+        )
+        frame["shares_outstanding_is_missing"] = frame["shares_outstanding"].isna()
+        if name == "v1":
+            v1 = frame
+        else:
+            v2 = frame
     missing_without_reason = (
-        v1["shares_outstanding_is_missing"]
-        & v1["shares_outstanding_missing_reason"].isna()
+        v1["shares_outstanding_is_missing"] & v1["shares_outstanding_missing_reason"].isna()
     )
     v1.loc[
         missing_without_reason,
         "shares_outstanding_missing_reason",
     ] = "no fiscal disclosure available at observation cutoff"
-    return ProductionFeatureSets(v0=v0, v1_core=v1)
+    v2.loc[
+        v2["shares_outstanding_is_missing"] & v2["shares_outstanding_missing_reason"].isna(),
+        "shares_outstanding_missing_reason",
+    ] = "no fiscal disclosure available at observation cutoff"
+    return ProductionFeatureSets(v0=v0, v1_core=v1, v2_extended=v2)
 
 
 def build_production_supervised_dataset(
@@ -320,12 +345,9 @@ def build_production_supervised_dataset(
     market = bundle.market_context[["trading_date", "topix_close"]].copy()
     market["trading_date"] = pd.to_datetime(market["trading_date"]).dt.normalize()
     topix_lookup = market.set_index("trading_date")["topix_close"]
-    label_maturity_lookup = (
-        bundle.market_context.assign(
-            trading_date=pd.to_datetime(bundle.market_context["trading_date"]).dt.normalize()
-        )
-        .set_index("trading_date")["available_at"]
-    )
+    label_maturity_lookup = bundle.market_context.assign(
+        trading_date=pd.to_datetime(bundle.market_context["trading_date"]).dt.normalize()
+    ).set_index("trading_date")["available_at"]
     sector_index = _sector_cumulative_index(bundle.sector_context)
     universe_keys = set(
         zip(
@@ -387,9 +409,7 @@ def build_production_supervised_dataset(
             universe_keys=universe_keys,
         )
         label_1230_status = (
-            CapabilityStatus.AVAILABLE
-            if afternoon_rows == len(daily)
-            else CapabilityStatus.PARTIAL
+            CapabilityStatus.AVAILABLE if afternoon_rows == len(daily) else CapabilityStatus.PARTIAL
         )
     else:
         label_1230_status = CapabilityStatus.BLOCKED_BY_DATA_CAPABILITY
@@ -457,9 +477,13 @@ def write_production_feature_snapshot(
             expected_metadata=metadata,
         )
         existing = pd.read_parquet(parquet_path)
-        existing_rows = pd.util.hash_pandas_object(
-            existing.sort_values(["trading_date", "symbol"]).reset_index(drop=True), index=False
-        ).to_numpy().tobytes()
+        existing_rows = (
+            pd.util.hash_pandas_object(
+                existing.sort_values(["trading_date", "symbol"]).reset_index(drop=True), index=False
+            )
+            .to_numpy()
+            .tobytes()
+        )
         if hashlib.sha256(metadata_identity + existing_rows).hexdigest() != snapshot_id:
             raise RuntimeError("existing production feature snapshot failed content validation")
         observed = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -521,6 +545,7 @@ def load_production_feature_snapshot(
     manifests = {
         V0_MANIFEST.feature_set_id: V0_MANIFEST,
         V1_CORE_MANIFEST.feature_set_id: V1_CORE_MANIFEST,
+        V2_EXTENDED_MANIFEST.feature_set_id: V2_EXTENDED_MANIFEST,
     }
     feature_set_id = str(observed["feature_set_id"])
     feature_set_version = str(observed["feature_set_version"])
@@ -817,12 +842,13 @@ def load_production_dataset_snapshot(
 def write_production_build_manifest(
     v0: ProductionFeatureSnapshot,
     v1: ProductionFeatureSnapshot,
+    v2: ProductionFeatureSnapshot,
     dataset: ProductionDatasetSnapshot,
     destination: Path,
     *,
     created_at: datetime,
 ) -> ProductionBuildManifest:
-    """Publish the final atomic marker only after all three snapshots authenticate."""
+    """Publish the final atomic marker only after all four snapshots authenticate."""
 
     if created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("production build created_at must be timezone-aware")
@@ -830,19 +856,47 @@ def write_production_build_manifest(
         raise ValueError("production build V0 manifest mismatch")
     if v1.feature_set_id != V1_CORE_MANIFEST.feature_set_id:
         raise ValueError("production build V1 manifest mismatch")
-    if not (
-        v0.source_snapshot_as_of
-        == v1.source_snapshot_as_of
-        == dataset.source_snapshot_as_of
-    ) or not (v0.source_snapshot_ids == v1.source_snapshot_ids == dataset.source_snapshot_ids):
+    if v2.feature_set_id != V2_EXTENDED_MANIFEST.feature_set_id:
+        raise ValueError("production build V2 manifest mismatch")
+    snapshots = (v0, v1, v2)
+    if any(
+        item.source_snapshot_as_of != dataset.source_snapshot_as_of for item in snapshots
+    ) or any(item.source_snapshot_ids != dataset.source_snapshot_ids for item in snapshots):
         raise ValueError("production build snapshots do not share one source lineage")
+    _validate_build_observation_contract(v0, v1, v2, dataset, error_type=ValueError)
     identity = {
         "source_snapshot_as_of": dataset.source_snapshot_as_of.isoformat(),
         "source_snapshot_ids": dataset.source_snapshot_ids,
         "v0_snapshot_id": v0.snapshot_id,
         "v1_snapshot_id": v1.snapshot_id,
+        "v2_snapshot_id": v2.snapshot_id,
         "dataset_snapshot_id": dataset.snapshot_id,
     }
+    required_dataset_manifests = {
+        (V0_MANIFEST.feature_set_version, V0_MANIFEST.manifest_hash),
+        (V1_CORE_MANIFEST.feature_set_version, V1_CORE_MANIFEST.manifest_hash),
+        (V2_EXTENDED_MANIFEST.feature_set_version, V2_EXTENDED_MANIFEST.manifest_hash),
+    }
+    if set(dataset.feature_manifests) != required_dataset_manifests:
+        raise ValueError("production dataset does not authenticate the exact V0/V1/V2 manifests")
+    loaded_v0, v0_frame = load_production_feature_snapshot(v0.parquet_path)
+    loaded_v1, v1_frame = load_production_feature_snapshot(v1.parquet_path)
+    loaded_v2, v2_frame = load_production_feature_snapshot(v2.parquet_path)
+    loaded_dataset, dataset_frame = load_production_dataset_snapshot(dataset.parquet_path)
+    if (
+        loaded_v0.snapshot_id,
+        loaded_v1.snapshot_id,
+        loaded_v2.snapshot_id,
+        loaded_dataset.snapshot_id,
+    ) != (v0.snapshot_id, v1.snapshot_id, v2.snapshot_id, dataset.snapshot_id):
+        raise ValueError("production build input paths do not authenticate the supplied snapshots")
+    _validate_build_feature_content(
+        v0_frame,
+        v1_frame,
+        v2_frame,
+        dataset_frame,
+        error_type=ValueError,
+    )
     build_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     destination = destination.resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -855,6 +909,7 @@ def write_production_build_manifest(
         "source_snapshot_ids": [list(item) for item in dataset.source_snapshot_ids],
         "v0_parquet_path": str(v0.parquet_path.resolve()),
         "v1_parquet_path": str(v1.parquet_path.resolve()),
+        "v2_parquet_path": str(v2.parquet_path.resolve()),
         "dataset_parquet_path": str(dataset.parquet_path.resolve()),
         "manifest_path": str(manifest_path),
     }
@@ -896,6 +951,24 @@ def load_production_build_manifest(manifest_path: Path) -> ProductionBuildManife
         raise RuntimeError("production build manifest is missing or invalid") from None
     if not isinstance(observed, dict) or observed.get("build_id") != build_id:
         raise RuntimeError("production build identity mismatch")
+    required_fields = {
+        "source_snapshot_as_of",
+        "source_snapshot_ids",
+        "v0_snapshot_id",
+        "v1_snapshot_id",
+        "v2_snapshot_id",
+        "dataset_snapshot_id",
+        "v0_parquet_path",
+        "v1_parquet_path",
+        "v2_parquet_path",
+        "dataset_parquet_path",
+        "manifest_path",
+        "metadata_hash",
+    }
+    if required_fields - set(observed):
+        raise RuntimeError("production build manifest is incomplete")
+    if Path(str(observed["manifest_path"])).resolve() != manifest_path:
+        raise RuntimeError("production build manifest path metadata mismatch")
     if observed.get("metadata_hash") != _metadata_hash(observed):
         raise RuntimeError("production build metadata hash mismatch")
     source_snapshot_ids = tuple(
@@ -906,35 +979,143 @@ def load_production_build_manifest(manifest_path: Path) -> ProductionBuildManife
         "source_snapshot_ids": source_snapshot_ids,
         "v0_snapshot_id": str(observed["v0_snapshot_id"]),
         "v1_snapshot_id": str(observed["v1_snapshot_id"]),
+        "v2_snapshot_id": str(observed["v2_snapshot_id"]),
         "dataset_snapshot_id": str(observed["dataset_snapshot_id"]),
     }
     recomputed = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     if recomputed != build_id:
         raise RuntimeError("production build content identity mismatch")
-    v0, _ = load_production_feature_snapshot(Path(str(observed["v0_parquet_path"])))
-    v1, _ = load_production_feature_snapshot(Path(str(observed["v1_parquet_path"])))
-    dataset, _ = load_production_dataset_snapshot(Path(str(observed["dataset_parquet_path"])))
-    if (v0.snapshot_id, v1.snapshot_id, dataset.snapshot_id) != (
+    v0, v0_frame = load_production_feature_snapshot(Path(str(observed["v0_parquet_path"])))
+    v1, v1_frame = load_production_feature_snapshot(Path(str(observed["v1_parquet_path"])))
+    v2, v2_frame = load_production_feature_snapshot(Path(str(observed["v2_parquet_path"])))
+    dataset, dataset_frame = load_production_dataset_snapshot(
+        Path(str(observed["dataset_parquet_path"]))
+    )
+    if (v0.snapshot_id, v1.snapshot_id, v2.snapshot_id, dataset.snapshot_id) != (
         identity["v0_snapshot_id"],
         identity["v1_snapshot_id"],
+        identity["v2_snapshot_id"],
         identity["dataset_snapshot_id"],
     ):
         raise RuntimeError("production build references the wrong snapshot identity")
-    if not (v0.source_snapshot_ids == v1.source_snapshot_ids == dataset.source_snapshot_ids):
+    if (
+        v0.feature_set_id != V0_MANIFEST.feature_set_id
+        or v0.manifest_hash != V0_MANIFEST.manifest_hash
+        or v1.feature_set_id != V1_CORE_MANIFEST.feature_set_id
+        or v1.manifest_hash != V1_CORE_MANIFEST.manifest_hash
+        or v2.feature_set_id != V2_EXTENDED_MANIFEST.feature_set_id
+        or v2.manifest_hash != V2_EXTENDED_MANIFEST.manifest_hash
+    ):
+        raise RuntimeError("production build feature-set role mismatch")
+    if not (
+        v0.source_snapshot_ids
+        == v1.source_snapshot_ids
+        == v2.source_snapshot_ids
+        == dataset.source_snapshot_ids
+        == source_snapshot_ids
+    ):
         raise RuntimeError("production build snapshot lineage mismatch")
+    source_snapshot_as_of = datetime.fromisoformat(str(observed["source_snapshot_as_of"]))
+    if not (
+        v0.source_snapshot_as_of
+        == v1.source_snapshot_as_of
+        == v2.source_snapshot_as_of
+        == dataset.source_snapshot_as_of
+        == source_snapshot_as_of
+    ):
+        raise RuntimeError("production build source cutoff mismatch")
+    _validate_build_observation_contract(v0, v1, v2, dataset, error_type=RuntimeError)
+    required_dataset_manifests = {
+        (V0_MANIFEST.feature_set_version, V0_MANIFEST.manifest_hash),
+        (V1_CORE_MANIFEST.feature_set_version, V1_CORE_MANIFEST.manifest_hash),
+        (V2_EXTENDED_MANIFEST.feature_set_version, V2_EXTENDED_MANIFEST.manifest_hash),
+    }
+    if set(dataset.feature_manifests) != required_dataset_manifests:
+        raise RuntimeError("production build dataset feature lineage mismatch")
+    _validate_build_feature_content(
+        v0_frame,
+        v1_frame,
+        v2_frame,
+        dataset_frame,
+        error_type=RuntimeError,
+    )
     return ProductionBuildManifest(
         build_id=build_id,
         created_at=datetime.fromisoformat(str(observed["created_at"])),
-        source_snapshot_as_of=datetime.fromisoformat(str(observed["source_snapshot_as_of"])),
+        source_snapshot_as_of=source_snapshot_as_of,
         source_snapshot_ids=source_snapshot_ids,
         v0_snapshot_id=v0.snapshot_id,
         v1_snapshot_id=v1.snapshot_id,
+        v2_snapshot_id=v2.snapshot_id,
         dataset_snapshot_id=dataset.snapshot_id,
         v0_parquet_path=v0.parquet_path,
         v1_parquet_path=v1.parquet_path,
+        v2_parquet_path=v2.parquet_path,
         dataset_parquet_path=dataset.parquet_path,
         manifest_path=manifest_path,
     )
+
+
+def _validate_build_observation_contract(
+    v0: ProductionFeatureSnapshot,
+    v1: ProductionFeatureSnapshot,
+    v2: ProductionFeatureSnapshot,
+    dataset: ProductionDatasetSnapshot,
+    *,
+    error_type: type[ValueError] | type[RuntimeError],
+) -> None:
+    artifacts = (v0, v1, v2, dataset)
+    if any(item.as_of != dataset.as_of for item in artifacts[:-1]):
+        raise error_type("production build snapshots do not share one observation as_of")
+    if any(
+        item.historical_revision_policy != dataset.historical_revision_policy
+        for item in artifacts[:-1]
+    ):
+        raise error_type("production build snapshots do not share one revision policy")
+    if any(
+        item.historical_revision_status != dataset.historical_revision_status
+        for item in artifacts[:-1]
+    ):
+        raise error_type("production build snapshots do not share one revision status")
+
+
+def _validate_build_feature_content(
+    v0: pd.DataFrame,
+    v1: pd.DataFrame,
+    v2: pd.DataFrame,
+    dataset: pd.DataFrame,
+    *,
+    error_type: type[ValueError] | type[RuntimeError],
+) -> None:
+    for frame, manifest in (
+        (v0, V0_MANIFEST),
+        (v1, V1_CORE_MANIFEST),
+        (v2, V2_EXTENDED_MANIFEST),
+    ):
+        columns = ["symbol", "trading_date", *manifest.feature_names]
+        if missing := set(columns) - set(frame.columns):
+            raise error_type(
+                f"production {manifest.feature_set_id} snapshot is missing columns: "
+                f"{sorted(missing)}"
+            )
+        if missing := set(columns) - set(dataset.columns):
+            raise error_type(
+                f"production dataset is missing {manifest.feature_set_id} columns: "
+                f"{sorted(missing)}"
+            )
+        observed = frame.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True)
+        embedded = dataset.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True)
+        try:
+            pd.testing.assert_frame_equal(
+                observed,
+                embedded,
+                check_dtype=False,
+                check_exact=True,
+            )
+        except AssertionError:
+            raise error_type(
+                f"production dataset feature values do not match {manifest.feature_set_id} snapshot"
+            ) from None
 
 
 def run_production_walk_forward_baselines(
@@ -1150,8 +1331,7 @@ def _evaluate_baseline(
         raise ValueError(f"BLOCKED_BY_VALIDATION: no usable {model_name} walk-forward folds")
     gross = float(np.mean(selected_returns))
     cost_scenarios = tuple(
-        (bps, 0.0 if model_name == "CASH" else gross - bps / 10_000)
-        for bps in (10, 20, 30, 50)
+        (bps, 0.0 if model_name == "CASH" else gross - bps / 10_000) for bps in (10, 20, 30, 50)
     )
     return BaselineModelSummary(
         model_name=model_name,
@@ -1194,9 +1374,7 @@ def _add_horizon_labels(
         else pd.NaT
         for value in output["trading_date"]
     ]
-    output[f"label_available_at_{horizon}d"] = output[end_column].map(
-        label_maturity_lookup
-    )
+    output[f"label_available_at_{horizon}d"] = output[end_column].map(label_maturity_lookup)
     entry = daily[["symbol", "trading_date", "adjusted_close"]].rename(
         columns={
             "trading_date": entry_column,
@@ -1245,9 +1423,7 @@ def _add_horizon_labels(
         validate="many_to_one",
     )
     sector_return = output["__sector_end"] / output["__sector_start"] - 1
-    sector_missing = (
-        output["__sector_missing_end"] - output["__sector_missing_start"]
-    ) > 0
+    sector_missing = (output["__sector_missing_end"] - output["__sector_missing_start"]) > 0
     sector_return = sector_return.mask(sector_missing)
     output[f"target_sector_excess_{horizon}d"] = target - sector_return
     output[f"target_beta_residual_{horizon}d"] = target - output["beta_60d"] * topix_return
@@ -1261,21 +1437,13 @@ def _add_horizon_labels(
         for symbol, entry_date in zip(output["symbol"], output[entry_column], strict=True)
     ]
     missing_entry = output[entry_column].notna() & output["__entry_close"].isna()
-    status = status.mask(
-        missing_entry & ~pd.Series(membership_at_entry), "DELISTED_NO_ENTRY_PRICE"
-    )
-    status = status.mask(
-        missing_entry & pd.Series(membership_at_entry), "SUSPENDED_NO_ENTRY_PRICE"
-    )
+    status = status.mask(missing_entry & ~pd.Series(membership_at_entry), "DELISTED_NO_ENTRY_PRICE")
+    status = status.mask(missing_entry & pd.Series(membership_at_entry), "SUSPENDED_NO_ENTRY_PRICE")
     membership_at_end = [
         (str(symbol), pd.Timestamp(end_date)) in universe_keys if pd.notna(end_date) else False
         for symbol, end_date in zip(output["symbol"], output[end_column], strict=True)
     ]
-    missing_exit = (
-        output[end_column].notna()
-        & output["__future_close"].isna()
-        & ~missing_entry
-    )
+    missing_exit = output[end_column].notna() & output["__future_close"].isna() & ~missing_entry
     status = status.mask(missing_exit & ~pd.Series(membership_at_end), "DELISTED_NO_EXIT_PRICE")
     status = status.mask(missing_exit & pd.Series(membership_at_end), "SUSPENDED_NO_EXIT_PRICE")
     output[f"label_status_{horizon}d"] = status
@@ -1324,9 +1492,7 @@ def _sector_cumulative_index(sector_context: pd.DataFrame) -> pd.DataFrame:
 def _causal_beta(daily: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
     topix = market.sort_values("trading_date").copy()
     topix["__market_return"] = topix["topix_close"].pct_change(fill_method=None)
-    joined = daily[
-        ["symbol", "trading_date", "trading_session_index", "adjusted_close"]
-    ].merge(
+    joined = daily[["symbol", "trading_date", "trading_session_index", "adjusted_close"]].merge(
         topix[["trading_date", "__market_return"]],
         on="trading_date",
         how="left",
@@ -1335,15 +1501,13 @@ def _causal_beta(daily: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
     joined["__stock_return"] = joined.groupby("symbol", sort=False)["adjusted_close"].pct_change(
         fill_method=None
     )
-    contiguous = (
-        joined.groupby("symbol", sort=False)["trading_session_index"].diff().eq(1)
-    )
+    contiguous = joined.groupby("symbol", sort=False)["trading_session_index"].diff().eq(1)
     joined.loc[~contiguous, "__stock_return"] = np.nan
     parts: list[pd.DataFrame] = []
     for _symbol, group in joined.groupby("symbol", sort=True):
         group = group.sort_values("trading_date").copy()
-        covariance = group["__stock_return"].rolling(60, min_periods=60).cov(
-            group["__market_return"]
+        covariance = (
+            group["__stock_return"].rolling(60, min_periods=60).cov(group["__market_return"])
         )
         variance = group["__market_return"].rolling(60, min_periods=60).var(ddof=1)
         group["beta_60d"] = covariance / variance

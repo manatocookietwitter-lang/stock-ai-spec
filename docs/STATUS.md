@@ -1,7 +1,7 @@
 # Project Status
 
 更新日: 2026-08-24
-状態: `GOAL_2_IMPLEMENTATION_COMPLETE_LIVE_HISTORY_BLOCKED_BY_PROCESS_CREDENTIAL`
+状態: `GOAL_3_IMPLEMENTATION_COMPLETE_LIVE_RESEARCH_BLOCKED_BY_PROCESS_CREDENTIAL`
 
 ## Goal 1で実装したもの
 
@@ -155,6 +155,48 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 - future price mutation invariance、V0/V1共有値一致、Momentum/Ridge locked holdout、Decision Engine research E2E
 - holdout期間価格の1/5/20日model不変、snapshot schema collision/改ざん、report/dataset provenance mismatch、Premium label maturity
 
+## Goal 3で実装したもの（実データ研究run待ち）
+
+### FeatureSet V2 Extended Technical
+
+- V2 ExtendedをV1 Coreの厳密supersetとしてversioned manifest化
+- downside volatility、60/120日最大drawdown、return skew、60日左裾quantileを追加
+- volume z-score、20/60日売買代金比、OBV 20日傾き、CMF 20を追加
+- adjusted openを推測せず、body/range/wick/close location/gapと20/60日breakoutを追加
+- V2を一度だけ計算し、同一観測からV1/V0を厳密projectionする
+- V0/V1/V2/Datasetを同じsource lineage・observation as-of・revision policy/statusのProduction Build Manifestへ含め、Dataset内feature値と各snapshotの完全一致を公開時・読込時に検証
+
+### GBDT / Learning to Rank / downside
+
+- LightGBM、XGBoost、CatBoostの回帰とLearning to Rank adapterを実装
+- 1 / 5 / 20日を独立modelとして扱い、日付内relevance 0〜4でrankerを学習
+- LightGBM/XGBoost/CatBoostの10% quantile回帰とabsolute-return大幅下落classifierを実装
+- Brier、log loss、expected calibration error、quantile lower-tail rate / pinball lossを保存
+- fold-local clipping、median imputation、相関pruningを実装し、validation値でfitしない
+- bounded Optunaはtrial数・時間・seed・single-jobをconfigで固定し、strictly earlier tuning期間だけを目的関数に使う
+- tuning期間と後続outer model-evaluation OOFをhorizon別に分離し、outer targetが自身のparameter選択へ入らない回帰testを追加
+- COMPLETE / PRUNED / FAILを含む全Optuna trialのparameter・score・state・duration・failure reasonを保存し、COMPLETEが0件でも失敗ExperimentRecordへ監査列を残す
+
+### OOF evaluation / ablation / ensemble / uncertainty
+
+- 全model/task/horizon/seedのrow-level OOFを保存し、重複identityと非有限predictionを拒否
+- pooled相関ではなく日付別Rank IC、ICIR、NDCG@5/10/20、Precision@K、Top-K targetを計算
+- 実FeatureSet V0をF0とし、F1〜F12を直前championへ逐次追加するablationを実装。promotionはstrictly earlier tuning期間、incremental ICは後続outer期間で評価。F8/F9を非重複化し、V2にない需給F11は推測せず`BLOCKED_BY_DATA_CAPABILITY`
+- OOS validation permutation importance、missing rate、fold retention率、seed間Rank IC / prediction安定性を診断
+- outer OOFを時系列順のstacking fit / uncertainty calibration / final evaluationへ3分割し、label endpointで各境界をpurgeしたうえで非負・総和1 stackingと未接触区間のcoverageを評価
+- absolute-return OOFをexpected return / downside quantile / large-loss probabilityへ集約し、予測as-ofより前にlabelが成熟したresidualだけでstandard errorを更新
+- 1/5/20日すべてとaware `as_of`・model/feature/data provenanceを必須にした型付き`Prediction`を生成し、未成熟calibration/horizon非整合は明示block
+- benchmark-excess targetはabsolute returnへ偽装せず、Decision Engine入力への変換をfail closed
+
+### Research artifact / CLI
+
+- report、library version、commit、config全文/hash、Build/data/V2 feature snapshot、feature definition hash、全trial/fold、選択期間、holdout境界、cost/tax/Decision Engine version、revision policyを監査field化
+- OOF ParquetとJSON metadataをcontent-addressed directoryへatomic publishし、Parquet・metadata・report content hashをload時に再検証
+- `stock-ai research advanced`は認証済みV0/V1/V2/Dataset Build Manifestだけを入口とし、成功・設定不正・全trial失敗・途中fold失敗・artifact公開失敗をappend-only ExperimentRegistryへ保存。完了済trial/foldとreport/Build/V2 identityを失わない
+- model family / horizon / seed / estimator / Optuna / OOF行数 / model-fit数を明示的にboundし、超過時は`BLOCKED_BY_RESOURCE_CAPABILITY`
+- locked final holdoutはreport APIからrowを返さず、Goal 3 development reportは常にresearch-only / adoption不可
+- API keyが見えない現processではlive Production Datasetを作らず、deterministic fixtureでlibrary数値・漏洩境界・artifact改ざんを検証
+
 ## 検証結果
 
 2026-08-24に非editable installを更新後、Goal 2 final gateとして下記を実行した。`uv` executableはPATHにないため、
@@ -182,16 +224,29 @@ python -m uv run --no-sync stock-ai data capabilities --plan free
 - Goal 2A fixture integration: 5 V2 endpoint、raw/normalized各5 object、PIT read pass
 - idempotent refetch、non-retroactive correction、atomic failure、tamper、secret non-persistence: pass
 
+Goal 3 checkpoint前gate（source tree）:
+
+- Ruff: pass
+- mypy strict: pass（34 source files）
+- pytest: 136 pass
+- branch coverage: 85.74%（設定threshold 85%を通過）
+- LightGBM / XGBoost / CatBoost各4 taskの決定的OOF smoke: pass
+- V2全追加列のexact formula/warm-up/zero denominator、V0/V1/V2 projection、Production Build observation/content lineage: pass
+- locked holdout/outer target mutation invariance、label-maturity purge、OOF/report tamper、simplex、calibration、Decision Engine output contract: pass
+- Optuna全FAIL trial監査、完全なfold/trial identity、CLI設定不正を含む失敗registry保存: pass
+- 後段family/foldの失敗、非有限fold、artifact write/reload/OSErrorでも完了済監査とBuild/V2 lineageを保持: pass
+- installed `stock-ai` / `research advanced --help` / fixture E2E / `data verify` / source-installed SHA-256一致: pass
+
 read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/cost、software reliability）で実施し、主なhigh findingを回帰test化した。reviewerはfileを変更していない。
 
 ## 既知の制約
 
 - Goal 1 labelは12:30 entryやTOPIX/sector excess returnではなく、調整後終値間absolute returnの研究proxy
-- baseline uncertaintyは現状training residual RMSEであり、OOF calibrated prediction intervalではない
+- Goal 1 baseline uncertaintyはtraining residual RMSE。Goal 3はOOF calibrated rank-space intervalを持つが、live/full-scale empirical coverageは未評価
 - Goal 2実装とfixture/MockTransport検証は完了したが、現在のlocal catalogはfull historical datasetではないためProduction Dataset / baselineの実データartifactは未生成
 - NISA枠の詳細な機会費用、複数broker/複数税policyのrouter、申告税額は未実装。Tax Engineは意思決定用推定のみ
 - exact discrete optimizerは小さい明示candidate universe用。上限超過は近似解へ切り替えずfail closed
-- Goal 1 fixture datasetとJSONL experiment registryは単一process実装でinter-process lock未実装。Goal 2 Production snapshotはdirectory atomic publish + Build Manifestへ移行済み
+- JSONL experiment registryは単一process実装でinter-process lock未実装。Goal 2/3 Production snapshotとadvanced reportはdirectory atomic publish + Build Manifestへ移行済み
 - Git外でartifactを生成する場合は`STOCK_AI_CODE_COMMIT`を明示しないとprovenanceが`UNSET`になる
 - fixtureのvalidation結果からprofitabilityを推論しない。最終holdoutはfixture E2Eでも未使用のまま保持する
 - J-Quants APIは過去訂正の発生時刻を返さないため、初回取得以前の完全なrevision historyは復元不能
@@ -199,7 +254,9 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - `/fins/summary`の`ShOutFY`は期末開示値であり、日次shares outstanding seriesではない
 - J-Quants planは自動判定せず、CLIで宣言したplanより上のendpointをfail closedする
 - Corporate Actionのannouncement時刻と詳細種別はdaily price endpointに存在せず、effective-date adjustment lineageのみ。推測しない
-- full JPX履歴のmemory/time実測はAPI key継承後まで未実施。V1一回計算へ削減したがscale capabilityは実測完了まで`PARTIAL`
+- full JPX履歴のmemory/time実測はAPI key継承後まで未実施。Goal 3は推定OOF行数/model-fit数をfail closedでboundし、horizon/model-family batchを既定にしたが、scale capabilityは実測完了まで`PARTIAL`
+- Goal 3 advanced reportはdevelopment OOF専用でlocked holdoutを未開封。liveデータ、複数seed、全horizonの実runと最終holdout評価前にChampion採用しない
+- OOF ensembleの不確実性は日付内rank space。絶対return金額幅へのcalibrationはlive OOSが得られるまで未採用
 
 ## 実データ/APIまでblockedの項目
 
@@ -214,7 +271,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 ## Goal 2 implementation checkpoint後の継続順
 
 1. 上記final gateを根拠に、外部依存を除くGoal 2 implementation checkpointを作る。
-2. 外部blockをSTATUSへ残したままGoal 3（GBDT / LTR / quantile / downside / ablation / bounded Optuna / OOF ensemble / uncertainty）へ進む。
+2. 外部blockをSTATUSへ残したままGoal 3（GBDT / LTR / quantile / downside / ablation / bounded Optuna / OOF ensemble / uncertainty）を実装した。
 3. Codex再起動後、Standard Bulkで2017-01-04〜契約上の最新確定営業日をcheckpoint / resume取得する。
 4. `data verify`、Production V0/V1/Dataset、Momentum/Ridge baseline、research Decision E2Eを実データで実行し、Goal 2 live-data acceptanceを追記する。
-5. Goal 3 checkpoint後にGoal 4前場AI、続いてGoal 5 PWA / automation / Paper / manual execution recordへ進む。注文送信は対象外のままとする。
+5. Goal 3全gateとreview後にrecoverable checkpointを作成し、Goal 4前場AI、続いてGoal 5 PWA / automation / Paper / manual execution recordへ進む。注文送信は対象外のままとする。

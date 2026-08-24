@@ -35,7 +35,8 @@ class ExperimentRecord(BaseModel):
     model_type: str = Field(min_length=1)
     parameters: Mapping[str, int | float | str]
     seed: int | None
-    fold_results: tuple[Mapping[str, int | float], ...]
+    fold_results: tuple[Mapping[str, int | float | str], ...]
+    trial_results: tuple[Mapping[str, int | float | str], ...] = ()
     aggregate_results: Mapping[str, int | float | str]
     decision: str = Field(pattern="^(adopted|rejected|research_only)$")
     rejection_reason: str | None = None
@@ -60,22 +61,22 @@ class ExperimentRecord(BaseModel):
     ) -> Mapping[str, int | float | str]:
         return MappingProxyType(dict(value))
 
-    @field_validator("fold_results", mode="after")
+    @field_validator("fold_results", "trial_results", mode="after")
     @classmethod
-    def freeze_folds(
-        cls, value: tuple[Mapping[str, int | float], ...]
-    ) -> tuple[Mapping[str, int | float], ...]:
-        return tuple(MappingProxyType(dict(fold)) for fold in value)
+    def freeze_audit_rows(
+        cls, value: tuple[Mapping[str, int | float | str], ...]
+    ) -> tuple[Mapping[str, int | float | str], ...]:
+        return tuple(MappingProxyType(dict(row)) for row in value)
 
     @field_serializer("feature_definition_hashes", "parameters", "aggregate_results")
     def serialize_mapping(self, value: Mapping[str, object]) -> dict[str, object]:
         return dict(value)
 
-    @field_serializer("fold_results")
-    def serialize_folds(
-        self, value: tuple[Mapping[str, int | float], ...]
-    ) -> tuple[dict[str, int | float], ...]:
-        return tuple(dict(fold) for fold in value)
+    @field_serializer("fold_results", "trial_results")
+    def serialize_audit_rows(
+        self, value: tuple[Mapping[str, int | float | str], ...]
+    ) -> tuple[dict[str, int | float | str], ...]:
+        return tuple(dict(row) for row in value)
 
     @model_validator(mode="after")
     def valid_audit_record(self) -> ExperimentRecord:
@@ -84,6 +85,7 @@ class ExperimentRecord(BaseModel):
         values: list[object] = [
             *self.parameters.values(),
             *(value for fold in self.fold_results for value in fold.values()),
+            *(value for trial in self.trial_results for value in trial.values()),
             *self.aggregate_results.values(),
         ]
         if any(isinstance(value, float) and not math.isfinite(value) for value in values):
