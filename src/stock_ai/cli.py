@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, cast
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -113,6 +114,16 @@ from stock_ai.ml import (
     write_production_feature_snapshot,
 )
 from stock_ai.ml.experiments import ExperimentRecord, ExperimentRegistry
+from stock_ai.operations import (
+    AutomationStage,
+    DailyAutomation,
+    OperationalConflictError,
+    OperationalIntegrityError,
+    OperationalStore,
+    bootstrap_goal5_fixture,
+    create_app,
+    windows_task_scheduler_script,
+)
 from stock_ai.research import run_research_decision_e2e
 
 app = typer.Typer(
@@ -129,6 +140,11 @@ research_app = typer.Typer(
     help="Build immutable real-data datasets and research-only reports/proposals.",
 )
 app.add_typer(research_app, name="research")
+ops_app = typer.Typer(
+    no_args_is_help=True,
+    help="Run the local Goal 5 PWA ledger and automation (never submits orders).",
+)
+app.add_typer(ops_app, name="ops")
 
 
 @dataclass(frozen=True)
@@ -142,6 +158,220 @@ class _ProductionArtifacts:
 @app.callback()
 def main() -> None:
     """Run explicit research and fixture-only decision-support workflows."""
+
+
+@ops_app.command("capabilities")
+def ops_capabilities() -> None:
+    """Show the local Goal 5 boundary without exposing credential values."""
+    typer.echo("operational_ledger=AVAILABLE")
+    typer.echo("in_app_notifications=AVAILABLE")
+    typer.echo("web_push=BLOCKED_BY_CONFIGURATION")
+    typer.echo("remote_access=LOCALHOST_ONLY")
+    typer.echo("live_morning_provider=BLOCKED_BY_DATA_CAPABILITY")
+    typer.echo("approved_model_registry=BLOCKED_BY_DATA_CAPABILITY")
+    typer.echo("order_submission=OUT_OF_SCOPE")
+
+
+@ops_app.command("fixture-bootstrap")
+def ops_fixture_bootstrap(
+    database: Annotated[
+        Path,
+        typer.Option(help="Local SQLite WAL ledger path."),
+    ] = Path("data/operations/stock-ai.sqlite3"),
+    as_of: Annotated[
+        str | None,
+        typer.Option(help="Explicit aware 11:30 timestamp; defaults to today JST."),
+    ] = None,
+) -> None:
+    """Create an explicit deterministic PWA fixture; never a live-data fallback."""
+    selected = (
+        datetime.fromisoformat(as_of)
+        if as_of is not None
+        else datetime.now(ZoneInfo("Asia/Tokyo")).replace(
+            hour=11, minute=30, second=0, microsecond=0
+        )
+    )
+    if selected.tzinfo is None or selected.utcoffset() is None:
+        raise typer.BadParameter("as-of must be timezone-aware")
+    store = OperationalStore(database)
+    proposal_id = bootstrap_goal5_fixture(store, as_of=selected)
+    typer.echo("DETERMINISTIC_FIXTURE_ONLY - never production fallback, never an order")
+    typer.echo(f"database={store.path}")
+    typer.echo(f"proposal_id={proposal_id}")
+
+
+@ops_app.command("serve")
+def ops_serve(
+    database: Annotated[
+        Path,
+        typer.Option(help="Local SQLite WAL ledger path."),
+    ] = Path("data/operations/stock-ai.sqlite3"),
+    static_dir: Annotated[
+        Path,
+        typer.Option(help="Built PWA directory."),
+    ] = Path("web/dist"),
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8765,
+) -> None:
+    """Serve the PWA on localhost only; remote publication is not enabled."""
+    import uvicorn
+
+    if not (static_dir.resolve() / "index.html").is_file():
+        raise typer.BadParameter("static-dir must contain a built index.html; run npm build")
+    api = create_app(database, static_dir=static_dir)
+    typer.echo(f"Serving local decision support on http://127.0.0.1:{port}")
+    typer.echo("No broker/order submission route exists.")
+    uvicorn.run(api, host="127.0.0.1", port=port, access_log=False)
+
+
+@ops_app.command("run-daily")
+def ops_run_daily(
+    database: Annotated[
+        Path,
+        typer.Option(help="Local SQLite WAL ledger path."),
+    ] = Path("data/operations/stock-ai.sqlite3"),
+    business_date: Annotated[
+        str,
+        typer.Option(help="YYYY-MM-DD or today."),
+    ] = "today",
+    stage: Annotated[
+        AutomationStage | None,
+        typer.Option(help="Run only one idempotent stage."),
+    ] = None,
+) -> None:
+    """Run configured automation; unavailable live capabilities stop safely."""
+    now = datetime.now(ZoneInfo("Asia/Tokyo"))
+    selected = now.date() if business_date == "today" else date.fromisoformat(business_date)
+    store = OperationalStore(database)
+    if store.metadata("runtime_mode") is None:
+        store.set_metadata("runtime_mode", "LIVE_CAPABILITY_GATED")
+    stages = (stage,) if stage is not None else (AutomationStage.DATA_SYNC,)
+    records = DailyAutomation(store).run(
+        business_date=selected,
+        now=now,
+        handlers={},
+        stages=stages,
+    )
+    for record in records:
+        typer.echo(
+            f"stage={record.stage.value} status={record.status.value} "
+            f"reason={record.reason_code or '-'}"
+        )
+    if records and records[-1].status.value != "SUCCEEDED":
+        raise typer.Exit(code=2)
+
+
+@ops_app.command("verify")
+def ops_verify(
+    database: Annotated[
+        Path,
+        typer.Option(help="Local SQLite WAL ledger path."),
+    ] = Path("data/operations/stock-ai.sqlite3"),
+) -> None:
+    """Verify SQLite integrity and every immutable operational content hash."""
+    counts = OperationalStore(database).verify_integrity()
+    for name, count in counts.items():
+        typer.echo(f"{name}={count}")
+    typer.echo("status=OK")
+
+
+@ops_app.command("apply-executions")
+def ops_apply_executions(
+    next_as_of: Annotated[
+        str,
+        typer.Option(help="Aware timestamp for the next actual portfolio state."),
+    ],
+    database: Annotated[
+        Path,
+        typer.Option(help="Local SQLite WAL ledger path."),
+    ] = Path("data/operations/stock-ai.sqlite3"),
+    portfolio_id: Annotated[
+        str | None,
+        typer.Option(help="New immutable portfolio ID; generated when omitted."),
+    ] = None,
+) -> None:
+    """Apply only recorded fills to a new actual state; never submit an order."""
+
+    parsed = datetime.fromisoformat(next_as_of)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise typer.BadParameter("next-as-of must be timezone-aware")
+    store = OperationalStore(database)
+    try:
+        state = store.apply_unapplied_executions(
+            next_as_of=parsed,
+            next_portfolio_id=portfolio_id or f"actual-{uuid4()}",
+            created_at=datetime.now(ZoneInfo("Asia/Tokyo")),
+        )
+    except (OperationalConflictError, OperationalIntegrityError, ValueError) as exc:
+        typer.echo(f"apply blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"portfolio_id={state.portfolio_id}")
+    typer.echo(f"applied_execution_ids={len(state.applied_execution_ids)}")
+    typer.echo("order_submission=OUT_OF_SCOPE")
+
+
+@ops_app.command("backup")
+def ops_backup(
+    destination: Annotated[Path, typer.Option(help="New backup SQLite path.")],
+    database: Annotated[
+        Path,
+        typer.Option(help="Local SQLite WAL ledger path."),
+    ] = Path("data/operations/stock-ai.sqlite3"),
+) -> None:
+    """Create an online, integrity-checked SQLite backup."""
+    try:
+        path = OperationalStore(database).backup(destination)
+    except (OperationalConflictError, OperationalIntegrityError) as exc:
+        typer.echo(f"backup blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"backup={path}")
+
+
+@ops_app.command("restore")
+def ops_restore(
+    backup: Annotated[
+        Path,
+        typer.Option(exists=True, dir_okay=False, help="Verified backup SQLite path."),
+    ],
+    database: Annotated[Path, typer.Option(help="Local ledger path to replace.")] = Path(
+        "data/operations/stock-ai.sqlite3"
+    ),
+    confirm_replace: Annotated[
+        bool,
+        typer.Option("--confirm-replace", help="Confirm replacement after stopping the PWA."),
+    ] = False,
+) -> None:
+    """Restore a verified backup; requires an explicit replacement confirmation."""
+
+    try:
+        path = OperationalStore.restore_backup(
+            backup,
+            database,
+            confirm_replace=confirm_replace,
+        )
+    except (OperationalConflictError, OperationalIntegrityError) as exc:
+        typer.echo(f"restore blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"restored={path}")
+
+
+@ops_app.command("scheduler-script")
+def ops_scheduler_script(
+    database: Annotated[
+        Path,
+        typer.Option(help="Absolute ledger path used by scheduled jobs."),
+    ] = Path("data/operations/stock-ai.sqlite3"),
+    executable: Annotated[
+        str,
+        typer.Option(help="Installed stock-ai executable path or command."),
+    ] = "stock-ai",
+) -> None:
+    """Print an explicit user-run Windows Task Scheduler registration script."""
+    typer.echo(
+        windows_task_scheduler_script(
+            executable=executable,
+            database_path=str(database.resolve()),
+        )
+    )
 
 
 def _decimal(value: float) -> Decimal:

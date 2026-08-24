@@ -1,5 +1,10 @@
 .venv/
 .uv-cache/
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+*.tsbuildinfo
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -21,5 +26,6 @@ artifacts/reports/
 .demo-artifacts/
 *.duckdb
 *.sqlite
+*.sqlite3
 *.sqlite-shm
 *.sqlite-wal

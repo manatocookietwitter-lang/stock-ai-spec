@@ -522,3 +522,40 @@ current inferenceのPrediction batchは、11:30 feature行全体のcontent hash�
 Decision Engineもaudit価格・ADVと評価Candidateを照合し、research-only proposalへ証跡を保存する。
 履歴OOF replayをcurrent proposal用adapterへ渡すこと、認証済みrefit factoryを迂回したmodel bundle生成、
 内容identityが一致しないDataset snapshotのresearch/refit利用は拒否する。
+
+### D063 — Goal 5はlocal append-only台帳を実状態の正本にする
+
+Goal 5のAI提案、version付きユーザー判断、実約定、翌日Portfolio、通知、ランキング、Paper将来観測は
+SQLite WALの別recordとして保存し、同一identityの異なる内容を拒否する。提案は通知より先にarchiveし、翌日状態は
+保存済みユーザー判断ではなく実際のfillだけから生成する。PWA/APIは`127.0.0.1`だけで提供し、mutating APIは
+明示的なmanual-record intentを要求する。broker login、注文送信・変更・取消APIは設けない。
+
+各提案は、生成に使った`DecisionEngineConfig`全文をproposal ID / generated-atへ結びつけた不変
+`DecisionPolicySnapshot`と必ず同時に保存する。proposal payload、archive時刻証跡、policy snapshotは一つの
+SQLite transactionで公開し、いずれかが欠ける場合はproposalを成功・表示可能にしない。Settingsはこの認証済み
+snapshotだけを表示し、未登録の制約値をdefaultや推測値で埋めない。
+
+CSV取込は必ずpreview→差分確認→appendとし、既存recordを上書きしない。約定の逆売買、注文株数、累積超過、
+判断前時刻をpreviewで照合し、判断前時刻は確認でも上書きできない。口座状態CSVは非ゼロ保有の
+`POSITION` rowに加え、全account bucketの`CASH` rowとavailable / reserved cashを必須とし、
+保有だけ更新して古い現金を温存することを禁止する。
+実broker固有CSV mappingは代表file取得まで決め打ちしない。
+
+Paperは同一営業日の最終archive済み提案に対し、content-addressed不変台帳へ先に登録したJPX calendar、
+horizon session経路、aware endpoint、実label availability、archive後の観測時刻、proposal model versionを
+照合した実将来値だけを不変追加する。calendarはproposal archiveより前に固定済みであること、proposal営業日から
+ちょうど次の1 / 5 / 20 sessionであること、proposal archiveがlabel endpointより前であることを必須とする。
+同一営業日・horizonは1観測に限定する。週次・月次return、cost/tax推定誤差、
+Champion/Challenger絶対誤差、隣接する過去窓のdrift比を集計するが、最低観測数到達やdrift判定からmodelを自動昇格しない。
+運用curveとcompound returnは非重複の1営業日Paper系列だけを使い、5日・20日overlap labelを独立PnLとして複利計算しない。
+model誤差・drift・Challenger比較はactiveな同一version cohortだけで計算する。Challengerは最新観測から連続する
+同一versionの比較だけを使い、version切替または欠測をまたいで過去比較を再利用せず、比較分母を表示する。
+PWA service workerはstatic shellだけをcacheし、`/api/` responseや前日の提案をoffline cacheから再表示しない。
+
+運用backupは新規pathへonline SQLite backupし、全content hash・status→same-day archive済みproposal参照を検証後、
+atomic no-replaceで公開する。restoreはPWA/job停止後、明示的な
+replacement確認、restore元のread-only検証、restore後の再検証を必須とする。live handlerやdata capability不足時は
+jobを`BLOCKED_BY_DATA_CAPABILITY`で停止し、fixture・前日提案・推測dataへfallbackしない。
+jobはhandler前にdurable `RUNNING`を記録し、成功確定時にも同じprocessが未失効lockを所有することを再照合する。
+freshness/proposal lineageをblock・failure・成功stage reuseで保持し、stable logical-stage idempotency key、heartbeat、同一workflowの
+upstream成功を必須とする。APIはDailyStatusが指す提案だけを表示・操作可能にし、Host / Originをlocalhostへ限定する。

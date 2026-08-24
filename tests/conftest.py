@@ -20,6 +20,7 @@ from stock_ai.domain import (
     AccountBucket,
     AccountType,
     CashState,
+    PortfolioProposal,
     PortfolioState,
     Position,
     Prediction,
@@ -28,6 +29,7 @@ from stock_ai.domain import (
     TaxState,
     WithholdingMode,
 )
+from stock_ai.operations.models import DecisionPolicySnapshot
 
 JST = ZoneInfo("Asia/Tokyo")
 AS_OF = datetime(2026, 8, 24, 11, 30, tzinfo=JST)
@@ -136,6 +138,17 @@ def decision_engine(
                 taxable_rate=tax_rate,
             )
         ),
+    )
+
+
+def decision_policy_snapshot(
+    proposal: PortfolioProposal,
+    config: DecisionEngineConfig,
+) -> DecisionPolicySnapshot:
+    return DecisionPolicySnapshot(
+        proposal_id=proposal.proposal_id,
+        captured_at=proposal.generated_at,
+        config=config,
     )
 
 

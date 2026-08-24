@@ -1,7 +1,7 @@
 # Project Status
 
 更新日: 2026-08-24
-状態: `GOAL_4_IMPLEMENTATION_COMPLETE_LIVE_ADOPTION_BLOCKED_BY_CAPABILITY`
+状態: `GOAL_5_IMPLEMENTATION_COMPLETE_LIVE_ACCEPTANCE_BLOCKED_BY_CAPABILITY`
 
 ## Goal 1で実装したもの
 
@@ -248,6 +248,49 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 - fixture commandは`research_only=true / order_instruction=false / live_provider_used=false`を明示
 - fixture commandは履歴dataset→OOF→research refit→翌営業日の4銘柄current Predictionまで実行
 
+## Goal 5で実装したもの（local運用完成・live acceptanceはblocked）
+
+### Operational ledger / user workflow
+
+- SQLite WAL台帳へPortfolio、AI提案、version付きユーザー判断、実約定、翌日状態を別recordで保存
+- proposal/date、decision/version、execution IDをpayload hash、catalog identity、foreign keyで検証し、同一identityの異内容を拒否
+- 提案生成に使った`DecisionEngineConfig`全文をproposal IDと生成時刻へ結びつけた不変policy snapshotとして保存し、proposal / archive証跡 / policyを同一transactionで公開。snapshot欠落・改ざんは提案台帳のintegrity違反として拒否
+- 判断reviewは全lineを必須とし、AI推奨または取引なしの検証済み候補だけを許す。bucket別現金とexact cost/taxを再計算し、未再最適化株数は保存しない
+- 手動約定は方向・注文/約定株数・時刻を判断と照合し、next Portfolioは実fillだけから原子的に生成。proposal/decisionは上書きしない
+- 同一銘柄の複数account bucketを全画面・台帳・照合で分離
+
+### Automation / recovery
+
+- data sync、candidate、Morning capture、11:30 freeze、prediction、proposal、notification、EOD、monthly challengerのstage contractを実装
+- process lock/heartbeat、handler前RUNNING、成功確定時のlock owner/expiry再照合、stable logical-stage idempotency key、同一workflow upstream gate、freshness/proposal lineageを保持した成功stageの状態repair、失敗・block記録を実装
+- proposal archive完了前の通知を拒否し、stale/error時は同日archive済みでも提案を表示しない
+- live handler未設定時は`BLOCKED_BY_DATA_CAPABILITY`で停止し、fixtureや前日提案へfallbackしない
+- Windows Task Scheduler登録scriptを表示するが自動実行せず、ユーザーreview後の手動登録に限定
+- payload/catalog/FK/SQLite integrity検証、status→same-day archive済みproposal照合、atomic no-replace backup、read-only元と明示確認付きrestore、restore前後検証を実装
+
+### Mobile PWA / API
+
+- React / TypeScript / Viteのmobile-first PWAとFastAPI local APIを実装し、`127.0.0.1`でserve、Host/Originもlocalhostへ限定
+- 5項目下部nav、Home、Today、Decision Review、Decision Saved、Execution、Ranking、Stock Detail、Validation、正式capital/model下層を含むSettings、Data Operationsを実装
+- Settingsの現金・保有・税状態に加え、最低現金比率、最大保有数、銘柄・業種・turnover・ADV上限、改善閾値等をarchive済みproposalのpolicy snapshotから表示し、未登録値を推測しない
+- TodayはSELL/REDUCE/BUYを優先、HOLDを折り畳み、SKIPを変更一覧から除外。株数中心でcurrent→recommended→differenceを表示
+- 100株制約・cash/cost/taxを安全な選択候補ごとに再計算し、未再最適化または違反中は保存不可。判断保存と約定記録にはmanual intent headerを必須化
+- Ranking候補順位と最終Portfolio Actionを分離し、Stock Detailは同一symbolのaccount bucket tab、加重取得単価、口座別Actionを分離表示
+- loading / empty / stale / error / fixture状態、data/model timestamp、model version、no-order disclaimerを表示
+- service workerはstatic shellだけをcacheし、`/api/` responseをcacheしない。open tabもvisibility/online/60秒で再取得し、offline時は保持提案を破棄
+- CSP、frame拒否、referrer拒否、secret value非表示を実装。broker/order routeは存在しない
+- Playwright / Microsoft Edge / disposable fixture台帳でToday→判断変更・保存→一部約定→実保有反映→Homeの実backend込みE2Eを固定gate化
+- E2EはNTTのSELL 500株中100株の部分約定を記録し、apply後のHomeで実保有が500株から400株へ変わったことをexact assert
+
+### Import / Paper validation
+
+- 約定CSVと口座状態CSVをpreview-firstで取込み、逆売買・注文株数・累積fill差異をconflict化し、明示確認後だけappend。判断前時刻は確認でも拒否
+- 口座状態CSVは非ゼロPOSITIONと全bucketのCASH row、available / reserved cashを必須とし、保有・現金を原子的に照合
+- Paper outcomeはarchive前に登録したcontent-addressed不変JPX calendar、exact next-session経路、aware endpoint/availability、archive-before-endpoint、model versionを照合した将来観測だけを不変保存
+- 1営業日・1営業日1観測だけを週次/月次compoundし、最大drawdown、minimum observation、active Champion cohort、最新行から連続するexact-version Challenger cohort、同一version隣接窓driftを実装
+- minimum observationやdriftからmodelを自動昇格せず、実観測のないfixture画面は空状態を表示
+- 起動、Task Scheduler、CSV schema、backup/restore、credential境界を`docs/GOAL5_RUNBOOK.md`へ記録
+
 ## 検証結果
 
 2026-08-24に非editable installを更新後、Goal 2 final gateとして下記を実行した。`uv` executableはPATHにないため、
@@ -303,6 +346,35 @@ Goal 4 checkpoint前gate（source tree）:
 - local `data verify`: 12 immutable object、Production artifact 0件、status OK
 - non-editable package再build後、Goal 4主要4 moduleのsource/installed SHA-256一致: pass
 
+Goal 5 final gate（source tree + installed wheel + Microsoft Edge）:
+
+```text
+.venv\Scripts\python.exe -m ruff check .
+.venv\Scripts\python.exe -m mypy src
+.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+.venv\Scripts\python.exe -m pytest --cov=stock_ai --cov-branch --cov-report=term-missing -q -p no:cacheprovider
+cd web
+npm run lint
+npm run typecheck
+npm test -- --run
+npm run build
+npm run test:e2e
+```
+
+- Ruff: pass
+- mypy strict: pass（43 source files）
+- pytest: 189 pass
+- branch coverage: 85.31%（設定threshold 85%を通過）
+- frontend ESLint / TypeScript / production build: pass
+- Vitest: 6 pass
+- Playwright / Microsoft Edge full-stack E2E: 1 pass。Today→判断変更→保存→NTT 500株のSELLを100株部分約定→実保有apply→Home 400株を検証
+- non-editable wheelを再buildし、installed `stock-ai --help` / `ops capabilities` / fixture bootstrap / `ops verify` / Task Scheduler script: pass
+- installed fixture台帳: Portfolio 1、proposal / archive / Decision policy各1、status 1、ranking 4、integrity `OK`
+- installed server: health `ok`、注文送信不可、Settingsは最低現金0.10・最大保有10・銘柄上限0.50等の実policy値を返し、credential valueを返さない
+- Goal 5主要6 moduleのsource / installed SHA-256一致: pass
+- read-only最終review（PIT/reliability、quant/Paper、portfolio/operations）: material checkpoint blockerなし
+- live data、profitability、model採用はこのgateでは評価していない
+
 read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/cost、software reliability）で実施し、主なhigh findingを回帰test化した。reviewerはfileを変更していない。
 
 ## 既知の制約
@@ -323,8 +395,12 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - full JPX履歴のmemory/time実測はAPI key継承後まで未実施。Goal 3は推定OOF行数/model-fit数をfail closedでboundし、horizon/model-family batchを既定にしたが、scale capabilityは実測完了まで`PARTIAL`
 - Goal 3 advanced reportはdevelopment OOF専用でlocked holdoutを未開封。liveデータ、複数seed、全horizonの実runと最終holdout評価前にChampion採用しない
 - OOF ensembleの不確実性は日付内rank space。絶対return金額幅へのcalibrationはlive OOSが得られるまで未採用
-- Goal 4 refit bundleとcurrent inferenceは明示的research-only。model weightの永続registry、live推論時間、drift監視、Champion承認はGoal 5運用基盤とlive OOS evidenceが揃うまで未採用
+- Goal 4 refit bundleとcurrent inferenceは明示的research-only。Goal 5はPaper drift記録を持つが、model weightの承認済み永続registry、live推論時間、十分なlive OOS evidenceが揃うまでChampion採用しない
 - Morning datasetのlabel endpointはcallerが供給するJPX session calendarとaware `label_end_at`に依存する。live provider未決のため、fixtureのpandas営業日・15:30 endpointは市場calendar/scheduleの代替でも収益性の証拠でもない
+- Goal 5 API/PWAはlocalhost専用。認証・TLS・remote hostingは未実装で、internetへ公開してはならない
+- PWA内通知だけ利用可能。web push providerは未設定で`BLOCKED_BY_CONFIGURATION`
+- daily automation frameworkとTask Scheduler scriptは実装済みだが、live data/Morning/model handlerは外部capability待ちで、未設定のstageは安全に停止する
+- Paper集計はlive forward observationが0件のため空状態。fixture proposalから収益性、drift、Champion採否を推論しない
 
 ## 実データ/APIまでblockedの項目
 
@@ -339,8 +415,8 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 ## Checkpoint後の継続順
 
-1. Goal 2 implementation checkpoint `269d720`とGoal 3 checkpoint `949502b`は作成済み。
-2. 上記Goal 4 gateとread-only review完了後、外部依存を除くrecoverable Goal 4 checkpointを作る。
-3. Goal 5 PWA / automation / Paper / user decision / manual execution recordを実装する。注文送信は対象外のままとする。
-4. Codex processがAPI keyを継承後、Standard Bulkで2017-01-04〜契約上の最新確定営業日をcheckpoint / resume取得する。
-5. `data verify`、Production Dataset、Goal 3 / 4 live OOSを実行し、live-data acceptanceとmodel採否を追記する。
+1. Goal 2 checkpoint `269d720`、Goal 3 checkpoint `949502b`、Goal 4 checkpoint `f7c1709`は作成済み。
+2. Goal 5の全gateとread-only reviewは完了し、このSTATUSを含む外部依存外のclean checkpointを正本とする。
+3. Codex processがAPI keyを継承後、Standard Bulkで2017-01-04〜契約上の最新確定営業日をcheckpoint / resume取得する。
+4. `data verify`、Production Dataset、Goal 3 / 4 live OOS、Goal 5 live Paper観測を実行し、live-data acceptanceとmodel採否を追記する。
+5. broker integrationと自動売買は今後も実装しない。

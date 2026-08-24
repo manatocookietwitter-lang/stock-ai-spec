@@ -1,0 +1,18 @@
+{
+  "name": "株AI 意思決定支援",
+  "short_name": "株AI",
+  "description": "11:30時点の日本株提案を確認し、手動判断と実約定を記録するPWA",
+  "start_url": "/today",
+  "display": "standalone",
+  "background_color": "#f4f7fa",
+  "theme_color": "#102a43",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "/stock-ai-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

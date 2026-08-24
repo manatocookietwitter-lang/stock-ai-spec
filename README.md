@@ -1,7 +1,7 @@
 # Stock AI Decision Support — Specification Bundle
 
 更新日: 2026-08-24
-状態: Goal 4前場AI研究基盤実装済み（live前場provider・model採用はfail closed）
+状態: Goal 5 local意思決定支援アプリ実装済み（live data/provider/model採用はfail closed）
 
 ## このリポジトリの目的
 
@@ -52,6 +52,8 @@ AIやアプリは実注文を出しません。最終判断と注文はユーザ
   - 進行状況、テスト結果、次の作業
 - `docs/JQUANTS_V2_RUNBOOK.md`
   - Goal 2Aの取得、保存、検証、障害対応、PIT制約
+- `docs/GOAL5_RUNBOOK.md`
+  - Goal 5 PWA、運用job、CSV照合、Paper、backup/restoreの手順
 
 ## Codexでの使い方
 
@@ -60,7 +62,7 @@ AIやアプリは実注文を出しません。最終判断と注文はユーザ
 3. 最初に `AGENTS.md` と `docs/` を読ませる。
 4. `CODEX_GOAL.md` の Goal 1 を貼る。
 5. 各Goal終了時に、Codexが `docs/STATUS.md` と `docs/DECISIONS.md` を更新したことを確認する。
-6. Goal 2、Goal 3へ進む。
+6. Goal 2〜Goal 5を、各品質gateとrecoverable checkpointを挟んで順番に進める。
 
 ## なぜGoal本文へ全仕様を貼らないか
 
@@ -183,6 +185,46 @@ aware endpoint timestampに限定する。role・capability・source lineage、1
 liquidityを実Portfolioと再照合し、research-only proposalまで保持する。live OOS evidenceと
 承認済みmodel registryがない間、本番Morning model採用はblockする。
 
+## Goal 5 local意思決定支援アプリ
+
+AI提案、ユーザー判断、実約定、翌日状態を別の不変recordとしてSQLite WAL台帳へ保存し、
+React / TypeScriptのmobile-first PWAから確認・記録できる。APIはlocalhostだけで提供し、
+broker login、注文送信・変更・取消routeを持たない。
+
+```text
+cd web
+npm ci
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+npm run test:e2e
+cd ..
+
+stock-ai ops fixture-bootstrap \
+  --database .demo-artifacts/goal5/operations.sqlite3 \
+  --as-of 2026-08-24T11:30:00+09:00
+stock-ai ops serve \
+  --database .demo-artifacts/goal5/operations.sqlite3 \
+  --static-dir web/dist
+```
+
+fixtureは画面・状態遷移確認専用であり、live data欠損時のfallbackでも収益性の証拠でもない。
+実運用jobはdata sync、candidate、Morning capture、11:30 freeze、prediction、proposal archive、
+notification、EOD、monthly challengerをidempotent stageとして持つ。live handler不足時は
+`BLOCKED_BY_DATA_CAPABILITY`で停止し、前日の提案を再利用しない。Task Scheduler用scriptは表示だけ行い、
+自動登録しない。
+
+PWAはHome / Today / Ranking / Validation / Settingsの5項目nav、安全に再評価できる株数候補の判断review、
+売買方向・注文/約定株数・時刻・手数料・税を含む手動約定、実fillからのnext Portfolio反映、
+CSV preview・差分照合を持つ。口座状態CSVは保有と全bucketのavailable / reserved cashを同時に照合する。
+Playwright E2Eはdisposable fixture台帳とlocal FastAPIをMicrosoft Edgeで操作し、判断変更から一部約定、
+next Portfolio反映、Homeで実株数が500株から400株へ変化するところまで検証する。提案生成に使った
+`DecisionEngineConfig`はproposal / archiveと同一transactionの不変policy snapshotとして保存し、Settingsは
+その実制約値を表示する。Paperはarchive前に固定したcontent-addressed JPX calendarで
+endpointを照合した将来観測だけを追加し、週次・月次、cost/tax誤差、
+Champion/Challenger誤差、driftを表示する。詳細な起動・復旧手順は`docs/GOAL5_RUNBOOK.md`を参照する。
+
 ## 現在のパッケージ構成
 
 - `src/stock_ai/domain`: 口座、保有、予測、提案、ユーザー判断、実約定の不変型
@@ -190,6 +232,8 @@ liquidityを実Portfolioと再照合し、research-only proposalまで保持す�
 - `src/stock_ai/features`: Feature Registry、V0/V1/V2 manifest、指標計算
 - `src/stock_ai/ml`: dataset snapshot、1/5/20日label、GBDT/LTR/downside、OOF ensemble、時系列検証、実験記録
 - `src/stock_ai/decision`: コスト、税、全体ポートフォリオ比較、状態遷移
+- `src/stock_ai/operations`: local台帳、automation、PWA API、CSV照合、Paper、backup/restore
+- `web`: React / TypeScript mobile PWA。`dist`はbuild artifactとしてGit管理外
 - `tests`: 外部API不要の決定的fixtureテスト
 
 APIキーや認証情報をsource、log、例外、fixture、Markdown、Git履歴へ置かない。live clientはprocess環境の`JQUANTS_API_KEY`だけを読み、`.env`や設定fileを自動読込しない。
