@@ -470,3 +470,55 @@ config全文、feature snapshot/definition hash、全Optuna trial、fold結果�
 全trialがFAILした場合もtrial監査を例外へ保持し、失敗ExperimentRecordへ永続化する。
 full JPXで一括materializeする推定OOF行数またはmodel fit数が明示上限を超える場合は、未測定のままOOMへ進まず
 `BLOCKED_BY_RESOURCE_CAPABILITY`で停止し、horizon/model-family単位のcontent-addressed batchとして実行する。
+
+### D061 — Goal 4 Morning AIはprovider-neutralな11:30 freezeと日次予測の残差更新にする
+
+前場data providerはQ003のまま未決とし、providerを推測・自動選択しない。実装済みの
+`IntradayMorningData`は、`symbol / timestamp / price / volume / trading_value / available_at /
+provider / source_record_id`を必須とする。`volume`と`trading_value`は各bar区間値であり、累積値は
+同一session内だけで計算する。09:00 / 09:05 / 09:15 / 09:30 / 10:00 / 11:00 / 11:30の
+exact barをF13 Morning Coreに必須とし、欠損時に直前値、日足OHLCV、日次出来高から推測しない。
+current holdingとdaily candidateのunionを監視universeとしてfreeze metadataへ固定し、現在保有の欠落を
+`BLOCKED_BY_DATA_CAPABILITY`にする。
+
+F13は時刻別return、TOPIX/sector relative、range/VWAP、realized volatility、同時刻volume/trading-value
+progress、監視対象内rank、daily prior forecastを持つ。同時刻profileは当日を除く直前20sessionだけを使う。
+F14 Morning Microstructureはquotes / order book / trade frequencyの各capabilityが明示的に存在する列だけを使い、
+不足列を0や合成値で補わない。当日終値と11:30後の値をmorning featureへ入れない。
+
+Morning modelは前日・当日朝にfreeze済みの1 / 5 / 20日daily forecastに対する残差を予測する。
+no-update daily forecastを必須baselineにし、固定parameterのRidge / LightGBMと、明示的に有効化したsmall MLPを
+purged expanding development OOFで比較する。各modelはOOSでbaselineを改善しなければ`REJECTED`にし、
+development結果から自動Champion昇格しない。1D-CNN / TCN / GRU / small Transformerは同期固定間隔の
+前場sequence履歴がない間`BLOCKED_BY_DATA_CAPABILITY`、small MLPも既定`DISABLED`とする。
+
+Decision Engine互換の更新値は、対象11:30より前にlabel endを迎え、かつ実際の`label_available_at`も対象11:30より前の
+OOF residualだけでdownside、large-loss、standard errorを較正し、daily予測とmorning revisionの両provenanceを
+型付き`Prediction`へ残す。ActionはMorning modelが
+直接出力せず、更新後Predictionを全保有・候補とともにDaily Portfolio Decision Engineへ渡して初めて決める。
+Morning Datasetとrow-level OOF reportはschema・値・source record ID・feature manifest・hashを含む
+content-addressed Parquet + JSON directoryとしてatomic publishし、再利用前に認証する。live provider未接続時は
+fixtureへfallbackせず、CLI capabilityを`BLOCKED_BY_DATA_CAPABILITY`として表示する。
+
+各sessionの`MorningFreezeMetadata`はprovider、全source snapshot / record ID、holding + candidate universeを持ち、
+roleとcapability reportを含めてfeature builder、dataset identity、Prediction batch、research-only proposalまで伝播する。
+label entryはexact 12:30、endはartifactに認証した固定JPX calendar上の1 / 5 / 20 session後だけとする。
+labelはendpointだけで成熟扱いせず、各fold学習と
+Decision較正の双方で`label_available_at < prediction.as_of`を要求する。F14はcapability組合せごとのmanifestを作り、
+AVAILABLE宣言済みの11:30値が欠けた場合はblockする。
+
+認証済みreport / Datasetからresearch-only modelを決定的に再fitし、履歴終了後のcurrent freezeをoutcomeなしで推論する
+経路を許す。Prediction provenanceはreport / snapshot / selected family / seedから導出し、caller自由文字列を使わない。
+この経路は実装検証用で、live OOS evidence・推論時間・承認済みmodel registryが揃うまで採用不可である。
+
+### D062 — Morning labelとDecision freezeは時刻・内容まで認証する
+
+Morning labelは`label_end_date`だけで成熟判定せず、timezone-awareな`label_end_at`を必須にする。
+`label_end_at`は認証済みJPX calendarのend sessionと同じ日で、entryより後、かつ
+`label_available_at >= label_end_at`でなければならない。過去の取引時間を一律の時刻で推測しない。
+
+current inferenceのPrediction batchは、11:30 feature行全体のcontent hashと、symbol別のreference price / ADVを
+不変証跡として持つ。Decision adapterは同じfeature行を再hashし、freeze roleと実Portfolio保有、価格・ADVを照合する。
+Decision Engineもaudit価格・ADVと評価Candidateを照合し、research-only proposalへ証跡を保存する。
+履歴OOF replayをcurrent proposal用adapterへ渡すこと、認証済みrefit factoryを迂回したmodel bundle生成、
+内容identityが一致しないDataset snapshotのresearch/refit利用は拒否する。

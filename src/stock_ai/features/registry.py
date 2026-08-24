@@ -59,7 +59,9 @@ class FeatureDefinition(BaseModel):
     name: str = Field(min_length=1)
     family: str = Field(min_length=1)
     version: int = Field(ge=1)
-    stage: str = Field(pattern=r"^v[0-3](_core|_extended)?$")
+    stage: str = Field(
+        pattern=r"^(v[0-3](_core|_extended)?|morning_core|morning_microstructure)$"
+    )
     inputs: tuple[str, ...]
     parameters: Mapping[str, int | float | str]
     formula: str = Field(min_length=1)

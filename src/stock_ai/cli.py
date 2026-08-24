@@ -32,6 +32,7 @@ from stock_ai.data import (
     SubscriptionPlan,
     build_production_data,
     capabilities_for,
+    morning_capabilities,
 )
 from stock_ai.decision import (
     CostPolicy,
@@ -60,33 +61,52 @@ from stock_ai.domain import (
     UserDecisionLine,
     WithholdingMode,
 )
-from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST, V2_EXTENDED_MANIFEST, FeatureEngine
-from stock_ai.fixtures import market_fixture, next_business_morning, portfolio_fixture
+from stock_ai.features import (
+    V0_MANIFEST,
+    V1_CORE_MANIFEST,
+    V2_EXTENDED_MANIFEST,
+    FeatureEngine,
+    build_morning_features,
+)
+from stock_ai.fixtures import (
+    market_fixture,
+    morning_research_fixture,
+    next_business_morning,
+    portfolio_fixture,
+)
 from stock_ai.ml import (
     AdvancedFoldResult,
     AdvancedResearchConfig,
     AdvancedResearchExecutionError,
     AdvancedResearchRun,
     BaselinePredictionBundle,
+    MorningResearchConfig,
     ProductionDatasetSnapshot,
     ProductionFeatureSets,
     PurgedExpandingWindowSplitter,
     RidgeRegressor,
     TrialAudit,
     TuningSearchError,
+    build_morning_supervised_dataset,
     build_production_feature_sets,
     build_production_supervised_dataset,
     build_supervised_dataset,
+    fit_morning_research_bundle,
+    infer_current_morning_predictions,
     load_advanced_research_run,
+    load_morning_dataset_snapshot,
     load_production_build_manifest,
     load_production_dataset_snapshot,
     load_production_feature_snapshot,
     reserve_locked_final_holdout,
     run_advanced_research,
+    run_morning_research,
     run_production_walk_forward_baselines,
     walk_forward_validate,
     write_advanced_research_run,
     write_dataset_snapshot,
+    write_morning_dataset_snapshot,
+    write_morning_research_run,
     write_production_baseline_report,
     write_production_build_manifest,
     write_production_dataset_snapshot,
@@ -126,6 +146,146 @@ def main() -> None:
 
 def _decimal(value: float) -> Decimal:
     return Decimal(str(round(value, 4)))
+
+
+@research_app.command("morning-capabilities")
+def research_morning_capabilities(
+    provider: Annotated[
+        str | None,
+        typer.Option(help="Explicit morning provider name; omitted means not configured."),
+    ] = None,
+    fields: Annotated[
+        str,
+        typer.Option(
+            help="Comma-separated fields declared by the provider contract; no API is called."
+        ),
+    ] = "",
+) -> None:
+    """Print the fail-closed Goal 4 morning-data capability boundary."""
+
+    declared_fields = tuple(value.strip() for value in fields.split(",") if value.strip())
+    report = morning_capabilities(provider=provider, available_fields=declared_fields)
+    typer.echo("capability status reason")
+    for name, status in report.capabilities.items():
+        typer.echo(f"{name} {status.value} {report.reasons.get(name, '-')}")
+    typer.echo(
+        "morning_model_adoption BLOCKED_BY_DATA_CAPABILITY "
+        "no authenticated live OOS evidence or approved model registry entry"
+    )
+
+
+@research_app.command("morning-fixture")
+def research_morning_fixture(
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory for the authenticated fixture-only morning report."),
+    ] = Path(".demo-artifacts/morning"),
+    enable_neural_challenger: Annotated[
+        bool,
+        typer.Option(help="Explicitly compare the small MLP research challenger."),
+    ] = False,
+) -> None:
+    """Run the explicit deterministic Goal 4 fixture; never a live-data fallback."""
+
+    bars, context, market, sectors, labels, freezes, trading_calendar = (
+        morning_research_fixture(periods=76)
+    )
+    capability_report = morning_capabilities(
+        provider="deterministic-fixture",
+        available_fields=(
+            "timestamp",
+            "price",
+            "volume",
+            "trading_value",
+            "historical_same_time_sessions",
+        ),
+    )
+    feature_output = build_morning_features(
+        bars,
+        daily_context=context,
+        market_bars=market,
+        sector_bars=sectors,
+        capability_report=capability_report,
+        freeze_metadata=freezes,
+    )
+    current_date = pd.to_datetime(feature_output.frame["trading_date"]).max()
+    historical_features = feature_output.frame.loc[
+        pd.to_datetime(feature_output.frame["trading_date"]) < current_date
+    ].copy()
+    historical_labels = labels.loc[pd.to_datetime(labels["trading_date"]) < current_date].copy()
+    publication_as_of = datetime(2027, 1, 1, tzinfo=UTC)
+    dataset = build_morning_supervised_dataset(
+        historical_features,
+        historical_labels,
+        publication_as_of=publication_as_of,
+        trading_calendar=trading_calendar,
+    )
+    snapshot = write_morning_dataset_snapshot(
+        dataset,
+        output_dir / "datasets",
+        created_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+        publication_as_of=publication_as_of,
+        capability_report=capability_report,
+        manifest=feature_output.manifest,
+        trading_calendar=trading_calendar,
+    )
+    authenticated_snapshot, authenticated_dataset = load_morning_dataset_snapshot(
+        snapshot.parquet_path
+    )
+    families: tuple[str, ...] = (
+        ("ridge", "lightgbm", "mlp") if enable_neural_challenger else ("ridge", "lightgbm")
+    )
+    config = MorningResearchConfig.model_validate(
+        {
+            "horizons": (1, 5, 20),
+            "model_families": families,
+            "seeds": (17, 23, 31) if enable_neural_challenger else (17,),
+            "initial_train_periods": 20,
+            "validation_periods": 5,
+            "step_periods": 10,
+            "holdout_periods": 5,
+            "lightgbm_estimators": 20,
+            "mlp_hidden_units": (8,),
+            "mlp_max_iterations": 100,
+            "enable_neural_challenger": enable_neural_challenger,
+            "max_model_fits": 200,
+        }
+    )
+    run = run_morning_research(
+        authenticated_snapshot,
+        authenticated_dataset,
+        created_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+        code_commit="fixture-only",
+        config=config,
+    )
+    fitted = fit_morning_research_bundle(
+        run,
+        authenticated_snapshot,
+        authenticated_dataset,
+        selected_family="ridge",
+        selected_seed=17,
+    )
+    current_freeze = next(
+        freeze for freeze in freezes if freeze.as_of.date() == pd.Timestamp(current_date).date()
+    )
+    current_predictions = infer_current_morning_predictions(
+        fitted,
+        feature_output,
+        current_freeze,
+        minimum_calibration_rows=20,
+    )
+    metadata_path, parquet_path = write_morning_research_run(run, output_dir)
+    typer.echo(
+        f"report={run.report.report_id} rows={len(authenticated_dataset)} "
+        f"oof={run.report.oof_rows} "
+        f"models={len(run.report.results)} locked_holdout_accessed=false"
+    )
+    typer.echo(
+        f"current_inference={len(current_predictions.predictions)} "
+        f"freeze={current_predictions.as_of.isoformat()} research_only=true"
+    )
+    typer.echo(f"metadata={metadata_path} oof_parquet={parquet_path}")
+    typer.echo("research_only=true order_instruction=false live_provider_used=false")
 
 
 @data_app.command("capabilities")
@@ -681,9 +841,7 @@ def research_advanced(
             )
         )
     except (ValueError, RuntimeError, OSError) as exc:
-        execution_error = (
-            exc if isinstance(exc, AdvancedResearchExecutionError) else None
-        )
+        execution_error = exc if isinstance(exc, AdvancedResearchExecutionError) else None
         completed_trial_contexts = (
             tuple(
                 (tuning.horizon, tuning.model_family, trial)
@@ -771,9 +929,7 @@ def _advanced_experiment_record(
             "feature_snapshot_id": report.feature_snapshot_id,
             "tax_policy_version": report.tax_policy_version,
             "decision_engine_version": report.decision_engine_version,
-            "cost_scenarios_bps": ",".join(
-                str(value) for value in report.cost_scenarios_bps
-            ),
+            "cost_scenarios_bps": ",".join(str(value) for value in report.cost_scenarios_bps),
         },
         seed=None,
         fold_results=tuple(_fold_audit_row(fold) for fold in report.fold_results),
@@ -906,20 +1062,14 @@ def _trial_audit_row(
         **({"model_family": model_family} if model_family is not None else {}),
         "number": trial.number,
         "state": trial.state,
-        "parameters": json.dumps(
-            dict(trial.parameters), sort_keys=True, separators=(",", ":")
-        ),
+        "parameters": json.dumps(dict(trial.parameters), sort_keys=True, separators=(",", ":")),
         **({"value": trial.value} if trial.value is not None else {}),
         **(
             {"duration_seconds": trial.duration_seconds}
             if trial.duration_seconds is not None
             else {}
         ),
-        **(
-            {"failure_reason": trial.failure_reason}
-            if trial.failure_reason is not None
-            else {}
-        ),
+        **({"failure_reason": trial.failure_reason} if trial.failure_reason is not None else {}),
     }
 
 

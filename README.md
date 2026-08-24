@@ -1,7 +1,7 @@
 # Stock AI Decision Support — Specification Bundle
 
 更新日: 2026-08-24
-状態: Goal 3本格ML研究基盤実装済み（live履歴runはcredential継承待ち）
+状態: Goal 4前場AI研究基盤実装済み（live前場provider・model採用はfail closed）
 
 ## このリポジトリの目的
 
@@ -161,6 +161,27 @@ FeatureSet V2 Extendedと、LightGBM / XGBoost / CatBoostの回帰・Learning to
 uncertainty calibrationを実装した。hyperparameter選択はstrictly earlier tuning期間、model評価は後続outer OOF、
 stacking・uncertainty calibration・reported coverageはさらに3つの時系列区間へ分離する。
 locked final holdoutは開かない。`research advanced`の成果物は常にresearch-onlyで、実注文を生成しない。
+
+## Goal 4 前場AI研究基盤
+
+provider-neutralな09:00〜11:30 bar契約、F13 Morning Core、capabilityがある場合だけのF14
+Morning Microstructure、同時刻20session volume profile、daily forecast残差更新を実装する。
+current holdingとcandidateを同じfreeze universeへ含め、11:30後のbar、当日終値、日足から推測した前場値を拒否する。
+
+```text
+stock-ai research morning-capabilities
+stock-ai research morning-fixture --output-dir .demo-artifacts/morning
+```
+
+`morning-capabilities`はprovider未設定時に`BLOCKED_BY_DATA_CAPABILITY`を表示し、fixtureへfallbackしない。
+`morning-fixture`は正しさ確認専用の明示fixtureで、Ridge / LightGBMと任意のsmall MLPをpurged development OOFで
+no-update daily forecastと比較する。DatasetとOOF reportはcontent-addressed Parquet + JSONへatomic publishして
+再読込認証する。認証済みreport / datasetからresearch-only modelを再fitし、履歴終了後の翌営業日11:30 featuresを
+outcomeなしでPredictionへ更新するfixture経路も持つ。全reportはresearch-only、locked holdout未開封、model自動昇格なし、
+order instructionなしである。labelは認証済み固定JPX calendarのexact 12:30 entry / 1・5・20 session endと
+aware endpoint timestampに限定する。role・capability・source lineage、11:30 feature content hash、freeze済みprice /
+liquidityを実Portfolioと再照合し、research-only proposalまで保持する。live OOS evidenceと
+承認済みmodel registryがない間、本番Morning model採用はblockする。
 
 ## 現在のパッケージ構成
 

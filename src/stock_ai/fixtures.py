@@ -6,13 +6,18 @@ tests.  They are never selected as a fallback for absent production data.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
+from stock_ai.data.morning import (
+    MorningFreezeMetadata,
+    build_morning_universe,
+    morning_capabilities,
+)
 from stock_ai.domain import (
     Account,
     AccountBucket,
@@ -184,3 +189,210 @@ def next_business_morning(last_trading_date: pd.Timestamp) -> datetime:
     while day.weekday() >= 5:
         day += timedelta(days=1)
     return datetime(day.year, day.month, day.day, 11, 30, tzinfo=JST)
+
+
+def morning_research_fixture(
+    periods: int = 75,
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    tuple[MorningFreezeMetadata, ...],
+    pd.DatetimeIndex,
+]:
+    """Explicit synchronized morning-history fixture; never a production fallback."""
+
+    if periods < 50:
+        raise ValueError("morning research fixture requires at least 50 sessions")
+    calendar = _fixture_jpx_calendar(periods + 20)
+    dates = calendar[:periods]
+    symbols = ("7203", "6758", "8306", "9432")
+    sectors = {
+        "7203": "Transport Equipment",
+        "6758": "Electric Appliances",
+        "8306": "Banks",
+        "9432": "Information & Communication",
+    }
+    cutoffs = (
+        time(9),
+        time(9, 5),
+        time(9, 15),
+        time(9, 30),
+        time(10),
+        time(11),
+        time(11, 30),
+    )
+    stock_rows: list[dict[str, object]] = []
+    market_rows: list[dict[str, object]] = []
+    sector_rows: list[dict[str, object]] = []
+    context_rows: list[dict[str, object]] = []
+    label_rows: list[dict[str, object]] = []
+    for day_number, trading_date in enumerate(dates):
+        day = trading_date.date()
+        signal = 0.0015 + 0.0008 * np.sin(day_number / 7)
+        for symbol_number, symbol in enumerate(symbols):
+            base = 1_000.0 + symbol_number * 250.0
+            symbol_signal = signal + symbol_number * 0.0003
+            for cutoff_number, cutoff in enumerate(cutoffs):
+                fraction = cutoff_number / (len(cutoffs) - 1)
+                timestamp = datetime.combine(day, cutoff, tzinfo=JST)
+                price = base * (1.0 + symbol_signal * fraction)
+                volume = (1_000.0 + symbol_number * 100.0) * (1.0 + day_number * 0.005)
+                stock_rows.append(
+                    _morning_bar(
+                        symbol=symbol,
+                        timestamp=timestamp,
+                        price=price,
+                        volume=volume,
+                        source_id=f"stock-{day}-{symbol}-{cutoff}",
+                    )
+                )
+            prior_values = {
+                horizon: (len(symbols) - symbol_number) * 0.0001 * (1 + horizon / 20)
+                for horizon in (1, 5, 20)
+            }
+            context_rows.append(
+                {
+                    "symbol": symbol,
+                    "trading_date": trading_date,
+                    "sector": sectors[symbol],
+                    "prior_close": base * 0.995,
+                    "average_daily_trading_value": 100_000_000.0,
+                    "prior_expected_return_1d": prior_values[1],
+                    "prior_expected_return_5d": prior_values[5],
+                    "prior_expected_return_20d": prior_values[20],
+                    "prior_downside_quantile": -0.02,
+                    "prior_large_loss_probability": 0.10,
+                    "prior_uncertainty": 0.02,
+                    "prior_rank_pct": (symbol_number + 1) / len(symbols),
+                    "prior_model_version": "fixture-daily-v1",
+                    "prior_feature_version": "fixture-daily-feature-v2",
+                    "prior_data_snapshot_id": "fixture-daily-snapshot",
+                    "prior_prediction_as_of": datetime.combine(day, time(8, 50), tzinfo=JST),
+                    "is_current_holding": symbol in {"7203", "8306"},
+                    "is_candidate": symbol != "7203",
+                    "available_at": datetime.combine(day, time(8, 50), tzinfo=JST),
+                }
+            )
+            label: dict[str, object] = {"symbol": symbol, "trading_date": trading_date}
+            for horizon in (1, 5, 20):
+                end_date = calendar[day_number + horizon]
+                label[f"target_return_{horizon}d"] = (
+                    prior_values[horizon]
+                    + symbol_signal * (1 + horizon / 20)
+                    + 0.0002 * np.sin(day_number / 3 + symbol_number)
+                )
+                label[f"label_entry_at_{horizon}d"] = datetime.combine(
+                    day, time(12, 30), tzinfo=JST
+                )
+                label[f"label_end_date_{horizon}d"] = end_date
+                label[f"label_end_at_{horizon}d"] = datetime.combine(
+                    end_date.date(), time(15, 30), tzinfo=JST
+                )
+                label[f"label_available_at_{horizon}d"] = datetime.combine(
+                    end_date.date(), time(16), tzinfo=JST
+                )
+                label[f"label_status_{horizon}d"] = "AVAILABLE"
+            label_rows.append(label)
+        for cutoff_number, cutoff in enumerate(cutoffs):
+            fraction = cutoff_number / (len(cutoffs) - 1)
+            timestamp = datetime.combine(day, cutoff, tzinfo=JST)
+            market_rows.append(
+                _morning_bar(
+                    symbol="TOPIX",
+                    timestamp=timestamp,
+                    price=2_000.0 * (1.0 + signal * 0.2 * fraction),
+                    volume=10_000.0,
+                    source_id=f"topix-{day}-{cutoff}",
+                )
+            )
+            for sector_name in sectors.values():
+                sector_rows.append(
+                    _morning_bar(
+                        symbol=sector_name,
+                        timestamp=timestamp,
+                        price=500.0 * (1.0 + signal * 0.4 * fraction),
+                        volume=5_000.0,
+                        source_id=f"sector-{sector_name}-{day}-{cutoff}",
+                    )
+                )
+    stock = pd.DataFrame(stock_rows)
+    market = pd.DataFrame(market_rows)
+    sector = pd.DataFrame(sector_rows)
+    capability_report = morning_capabilities(
+        provider="deterministic-fixture",
+        available_fields=(
+            "timestamp",
+            "price",
+            "volume",
+            "trading_value",
+            "historical_same_time_sessions",
+        ),
+    )
+    all_bars = pd.concat((stock, market, sector), ignore_index=True)
+    freeze_metadata: list[MorningFreezeMetadata] = []
+    universe = build_morning_universe(
+        current_holdings=("7203", "8306"),
+        candidates=("6758", "8306", "9432"),
+    )
+    for trading_date in dates:
+        day = trading_date.date()
+        day_rows = all_bars.loc[
+            all_bars["timestamp"].map(lambda value: pd.Timestamp(value).date()).eq(day)
+        ]
+        freeze_metadata.append(
+            MorningFreezeMetadata(
+                as_of=datetime.combine(day, time(11, 30), tzinfo=JST),
+                provider="deterministic-fixture",
+                source_snapshot_ids=(f"fixture-morning-snapshot-{day}",),
+                source_record_ids=tuple(sorted(day_rows["source_record_id"].astype(str).unique())),
+                universe=universe,
+                capability_report=capability_report,
+            )
+        )
+    return (
+        stock,
+        pd.DataFrame(context_rows),
+        market,
+        sector,
+        pd.DataFrame(label_rows),
+        tuple(freeze_metadata),
+        calendar,
+    )
+
+
+def _morning_bar(
+    *, symbol: str, timestamp: datetime, price: float, volume: float, source_id: str
+) -> dict[str, object]:
+    return {
+        "symbol": symbol,
+        "timestamp": timestamp,
+        "available_at": timestamp,
+        "price": price,
+        "volume": volume,
+        "trading_value": price * volume,
+        "provider": "deterministic-fixture",
+        "source_record_id": source_id,
+    }
+
+
+def _fixture_jpx_calendar(periods: int) -> pd.DatetimeIndex:
+    """Small explicit JPX-session fixture; never a production calendar fallback."""
+
+    fixture_holidays = {
+        date(2026, 1, 12),
+        date(2026, 2, 11),
+        date(2026, 2, 23),
+        date(2026, 3, 20),
+        date(2026, 4, 29),
+        date(2026, 5, 4),
+        date(2026, 5, 5),
+        date(2026, 5, 6),
+    }
+    candidates = pd.bdate_range("2026-01-06", periods=periods + len(fixture_holidays) + 10)
+    sessions = pd.DatetimeIndex(
+        [value for value in candidates if value.date() not in fixture_holidays]
+    )
+    return sessions[:periods]

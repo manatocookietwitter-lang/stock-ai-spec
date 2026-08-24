@@ -1,7 +1,7 @@
 # Project Status
 
 更新日: 2026-08-24
-状態: `GOAL_3_IMPLEMENTATION_COMPLETE_LIVE_RESEARCH_BLOCKED_BY_PROCESS_CREDENTIAL`
+状態: `GOAL_4_IMPLEMENTATION_COMPLETE_LIVE_ADOPTION_BLOCKED_BY_CAPABILITY`
 
 ## Goal 1で実装したもの
 
@@ -197,6 +197,57 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 - locked final holdoutはreport APIからrowを返さず、Goal 3 development reportは常にresearch-only / adoption不可
 - API keyが見えない現processではlive Production Datasetを作らず、deterministic fixtureでlibrary数値・漏洩境界・artifact改ざんを検証
 
+## Goal 4で実装したもの（live前場provider・model採用はblocked）
+
+### Morning data / freeze contract
+
+- provider-neutralな09:00〜11:30 bar契約と`MorningFreezeMetadata`を実装
+- `available_at <= 当日11:30`、aware JST timestamp、exact cutoff、価格・出来高・売買代金、重複をfail closed検証
+- current holdingとdaily candidateのunionを監視universeにし、bar universeとの完全一致を検証
+- freeze provider / source snapshot ID / 全source record IDをstock・TOPIX・sector入力と完全一致で検証
+- freezeのholding / candidate roleとcapability reportをfeature rowへ完全一致で検証
+- live provider未設定時は全capabilityを`BLOCKED_BY_DATA_CAPABILITY`とし、fixtureへfallbackしない
+- bar区間volume/valueとsession累積を分離し、日次出来高から前場値を推測しない
+
+### F13 / F14 features
+
+- `morning-core-v1`をmachine-readable Feature Manifestとして実装
+- 09:00→09:05 / 09:15 / 09:30 / 10:00 / 11:00 / 11:30 return、前日終値gapを実装
+- 同時刻TOPIX / sector relative、high / low / range、realized volatility、VWAP、range位置を実装
+- 各cutoff cumulative volumeと、当日を除く過去20session同時刻volume / trading-value progressを実装
+- monitored / candidate volume rank、holding / candidate role、freeze済みdaily prior forecastを実装
+- `morning-microstructure-v1`をF13 strict supersetとして定義し、quotes / order book / trade frequency能力がある列だけ実装
+- 部分F14をcapability固有の`morning-microstructure-v1-<feature-subset-hash>` manifestとして保存・再認証
+- exact cutoff欠損、宣言済みmicrostructure列欠損、11:30後のbarを推測補完せずblock
+
+### Morning model / Decision compatibility
+
+- 1 / 5 / 20日daily forecastに対する残差更新datasetを実装し、label entryが11:30より後であることを強制
+- label entryを同一session exact 12:30、endをartifactに認証した固定JPX calendarの1 / 5 / 20 session後へ固定し、aware `label_end_at`以前のavailabilityを拒否
+- 未成熟labelをpublication cutoffでblankにし、label statusを保存
+- fold学習・OOF較正とも`label_available_at < prediction.as_of`を要求し、遅延訂正をendpointへbackdateしない
+- no-update daily forecastに対し、固定parameter Ridge / LightGBM / optional small MLPをpurged expanding OOFで比較
+- modelごとにMSE、日付別Rank IC、revision win rate、holding / candidate row coverageを保存
+- OOS改善がないmodelを`REJECTED`、改善してもdevelopmentでは`RESEARCH`に留め、自動Champion昇格しない
+- small MLPは既定`DISABLED`。1D-CNN / TCN / GRU / small Transformerは同期sequence履歴不足で明示block
+- `label_end < prediction date`かつ`label_available_at < prediction.as_of`のresidualだけでdownside / large-loss / uncertaintyを更新
+- daily priorとmorning revisionの両provenanceを持つ型付き`Prediction`をDaily Portfolio Decision Engineへ接続
+- 1 / 5 / 20日、同一as_of、同一prior bundle、全freeze universeを満たすPrediction batchだけを生成
+- 認証済みreport / Datasetからresearch-only modelを再fitし、履歴終了後の翌営業日11:30をoutcomeなしで推論
+- refit bundleは認証済みfactoryだけで生成し、report / dataset / family / seed / training boundary / estimator contract / fitted state hashを一つのidentityとして再検証
+- current 20session profile欠損をimputeせずblockし、feature行content hashを再照合してfreeze済みprice / liquidityと全universeをtyped adapterでEngineへ渡す
+- provider / source snapshot+record / role / capability / report ID / price / ADVを`research-only` proposalまで保持し、実Portfolio保有と評価Candidateへ再照合
+- Morning modelはActionを直接出さず、current inference batchをEngineへ渡し、別の決定的fixtureでHOLD / SKIPからSELL / BUYへの変化がEngine経由で生じることを確認
+- Decision EngineはMorning predictionの混在、Portfolio freeze不一致、auditと評価Candidateのprice / ADV不一致を拒否
+
+### Immutable artifacts / CLI
+
+- Morning Datasetとrow-level OOF reportをschema・値・source ID・manifest・Parquet/metadata hash付きで保存
+- content-addressed directoryを一時directory完成後にatomic publishし、再利用前に認証
+- `research morning-capabilities`と、明示fixture専用`research morning-fixture`を追加
+- fixture commandは`research_only=true / order_instruction=false / live_provider_used=false`を明示
+- fixture commandは履歴dataset→OOF→research refit→翌営業日の4銘柄current Predictionまで実行
+
 ## 検証結果
 
 2026-08-24に非editable installを更新後、Goal 2 final gateとして下記を実行した。`uv` executableはPATHにないため、
@@ -237,6 +288,21 @@ Goal 3 checkpoint前gate（source tree）:
 - 後段family/foldの失敗、非有限fold、artifact write/reload/OSErrorでも完了済監査とBuild/V2 lineageを保持: pass
 - installed `stock-ai` / `research advanced --help` / fixture E2E / `data verify` / source-installed SHA-256一致: pass
 
+Goal 4 checkpoint前gate（source tree）:
+
+- Ruff: pass
+- mypy strict: pass（37 source files）
+- pytest: 161 pass
+- branch coverage: 85.10%（設定threshold 85%を通過）
+- exact 11:30 / provider / source / holding+candidate freeze、post-freeze source、遅延label availability: pass
+- F13 exact formula / warm-up / zero-volume、partial F14 manifest / null capability value / artifact tamper: pass
+- holdout endpoint purge、pre-fit resource bound、Ridge / LightGBM、3-seed全horizon MLP challenger: pass
+- aware label endpoint、snapshot range identity、authenticated report / Dataset refit、model bundle factory/state認証: pass
+- outcome-free current inference、全universe typed Prediction、feature evidence hash、Decision Engine exact-freeze E2E: pass
+- installed `research morning-capabilities`はlive provider未設定をfail closed、`research morning-fixture`は4 current Predictionを生成: pass
+- local `data verify`: 12 immutable object、Production artifact 0件、status OK
+- non-editable package再build後、Goal 4主要4 moduleのsource/installed SHA-256一致: pass
+
 read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/cost、software reliability）で実施し、主なhigh findingを回帰test化した。reviewerはfileを変更していない。
 
 ## 既知の制約
@@ -257,21 +323,24 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - full JPX履歴のmemory/time実測はAPI key継承後まで未実施。Goal 3は推定OOF行数/model-fit数をfail closedでboundし、horizon/model-family batchを既定にしたが、scale capabilityは実測完了まで`PARTIAL`
 - Goal 3 advanced reportはdevelopment OOF専用でlocked holdoutを未開封。liveデータ、複数seed、全horizonの実runと最終holdout評価前にChampion採用しない
 - OOF ensembleの不確実性は日付内rank space。絶対return金額幅へのcalibrationはlive OOSが得られるまで未採用
+- Goal 4 refit bundleとcurrent inferenceは明示的research-only。model weightの永続registry、live推論時間、drift監視、Champion承認はGoal 5運用基盤とlive OOS evidenceが揃うまで未採用
+- Morning datasetのlabel endpointはcallerが供給するJPX session calendarとaware `label_end_at`に依存する。live provider未決のため、fixtureのpandas営業日・15:30 endpointは市場calendar/scheduleの代替でも収益性の証拠でもない
 
 ## 実データ/APIまでblockedの項目
 
 - 現在のCodex processから`JQUANTS_API_KEY`を認識できず、full Bulk history取得は環境変数を継承した再起動待ち
 - 初回取得以前のprovider correction vintage、完全なlisting/delisting/corporate-action event lineage
 - 11:30時点の前場価格、出来高、market breadth、同時刻履歴
+- 承認済みMorning model registry entry、live OOS比較、11:30締切内の実推論時間
 - 日次shares outstanding、coverage検証済みmarket breadth、需給履歴
 - SBI等の保有・約定CSV mapping、実fee条件、実口座・NISA残枠・税状態
 - spread/slippage/market-impact calibration、live/paper forward observation
 - broker integrationと注文送信は仕様上blockedではなく、製品方針として対象外
 
-## Goal 2 implementation checkpoint後の継続順
+## Checkpoint後の継続順
 
-1. 上記final gateを根拠に、外部依存を除くGoal 2 implementation checkpointを作る。
-2. 外部blockをSTATUSへ残したままGoal 3（GBDT / LTR / quantile / downside / ablation / bounded Optuna / OOF ensemble / uncertainty）を実装した。
-3. Codex再起動後、Standard Bulkで2017-01-04〜契約上の最新確定営業日をcheckpoint / resume取得する。
-4. `data verify`、Production V0/V1/Dataset、Momentum/Ridge baseline、research Decision E2Eを実データで実行し、Goal 2 live-data acceptanceを追記する。
-5. Goal 3全gateとreview後にrecoverable checkpointを作成し、Goal 4前場AI、続いてGoal 5 PWA / automation / Paper / manual execution recordへ進む。注文送信は対象外のままとする。
+1. Goal 2 implementation checkpoint `269d720`とGoal 3 checkpoint `949502b`は作成済み。
+2. 上記Goal 4 gateとread-only review完了後、外部依存を除くrecoverable Goal 4 checkpointを作る。
+3. Goal 5 PWA / automation / Paper / user decision / manual execution recordを実装する。注文送信は対象外のままとする。
+4. Codex processがAPI keyを継承後、Standard Bulkで2017-01-04〜契約上の最新確定営業日をcheckpoint / resume取得する。
+5. `data verify`、Production Dataset、Goal 3 / 4 live OOSを実行し、live-data acceptanceとmodel採否を追記する。

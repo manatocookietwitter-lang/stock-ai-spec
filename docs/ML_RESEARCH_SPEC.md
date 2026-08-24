@@ -193,6 +193,30 @@ Feature Set Manifestには定義hash、前処理版、データ能力、コー�
 
 Actionそのものを直接最終出力にしない。
 
+Goal 4の初期Morning modelは、各horizonについて
+`post-11:30 realized return - frozen daily forecast`をtargetにした予測修正回帰とする。daily forecastをそのまま使う
+no-update baselineと同じvalidation rowで比較し、purged expanding OOFのMSEと日付別Rank ICが改善しないmodelは
+`REJECTED`にする。固定parameterのRidge / LightGBMを比較し、small MLPは明示的に有効化したresearch challenger
+としてだけ実行する。開発OOFは自動Champion昇格・本番採用の根拠にしない。
+
+downside quantile、large-loss probability、standard errorの初期更新は、各予測11:30より前にlabel endを迎えた
+だけでなく、実際に`label_available_at < prediction.as_of`となったOOF residual / outcomeだけを使う。未成熟label、
+遅延訂正、同日後場、将来sessionのresidualは学習・較正へ入れない。
+Morning labelは同一JPX sessionのexact 12:30から開始し、認証済み固定JPX calendar上の1 / 5 / 20 session後だけを
+endpointにする。endpointは日付だけでなくaware `label_end_at`を持ち、availabilityがその時刻より前なら拒否する。
+callerが与えたgeneric weekdayや早すぎるavailabilityを営業日・成熟済みとみなさない。
+locked final holdoutへlabel endが跨るdevelopment rowをhorizon別にpurgeし、holdout rowはreport APIへ返さない。
+current holding / candidate flagは監視roleであり、holdingをdatasetから除外してcandidateだけを採点しない。
+
+small MLPを有効化する場合は1 / 5 / 20日すべてと最低3 seedを必須とし、全horizon / seedのOOF改善を満たさない限り
+challenger全体を`REJECTED`にする。認証済みdevelopment report / datasetからのresearch-only再fitと、履歴終了後の
+current 11:30 featureに対するoutcome-free inferenceは許すが、live OOS evidence、推論時間計測、model registry承認前に
+production採用しない。
+再fit bundleはreport / dataset / family / seed / training boundary / fitted state hashを束ねたresearch-only identityを持つ。
+current featureは全freeze universe、role、provider、source ID、capabilityと完全一致し、20session profileを含む必須値が
+実値で揃う場合だけ推論する。Decision Engine adapterはfeature content hashを再検証し、freeze roleと実Portfolio保有を
+照合して、freeze済み11:30 price / liquidityとresearch lineageをproposalまで残す。
+
 ### Regime
 
 まず市場状態を通常モデルの特徴量に入れる。

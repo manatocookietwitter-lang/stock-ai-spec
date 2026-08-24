@@ -794,6 +794,8 @@ Beta・相関は最低観測数、外れ値処理、推定窓を明示する。
 - 無約定時間
 
 同時刻平均を作るには過去の同粒度履歴が必要。履歴がない場合に日次出来高から推測しない。
+current freezeで直前20sessionの同時刻profileが実値として揃わない場合は、median補完して推論せず
+`BLOCKED_BY_DATA_CAPABILITY`とする。
 
 ### 21.4 前場評価変化
 
@@ -806,6 +808,35 @@ Beta・相関は最低観測数、外れ値処理、推定窓を明示する。
 - 保有株内順位
 
 予測修正そのものはMorning modelの出力であり、同じ日の最終ラベルを入力へ漏らさない。
+
+### 21.5 Goal 4のmachine-readable manifest
+
+Goal 4では次をversioned manifestとして固定する。
+
+- `morning-core-v1`（F13）
+  - 09:00を始点とする各exact cutoff return
+  - 各cutoffのTOPIX / sector relative return
+  - 09:00前日終値gap、前場high / low / range、`sqrt(sum(log_return^2))`
+  - `VWAP = sum(bar trading_value) / sum(bar volume)`。volume 0は欠損
+  - 11:30 priceのVWAP乖離、range内位置。high=low時の位置は0.5
+  - 各cutoffの累積bar volumeと、当日を除く直前20session同時刻平均に対する進捗
+  - 各cutoffの売買代金進捗、11:30監視対象内volume rank
+  - current holding / candidate flagとfreeze済みdaily forecast
+- `morning-microstructure-v1`（F14）
+  - F13のstrict superset
+  - 11:30 spread bps、price / quote midpoint乖離
+  - bid / ask sizeがある場合の板偏り
+  - trade countがある場合の約定頻度と無約定秒数
+
+F14はquotes / order book / trade frequencyの独立capability組合せごとに、利用するmicrostructure列を正確に列挙した
+`morning-microstructure-v1-<feature-subset-hash>` manifestを作る。部分capabilityをfull F14と称さず、F13へ余分な列を
+暗黙追加しない。capabilityから導かれるmanifestとpublish対象manifestは双方向に完全一致させる。AVAILABLE宣言した
+capabilityの11:30値が欠ける場合は、そのF14 datasetをpublishしない。
+
+barの`volume / trading_value`は区間値とし、session累積はfeature実装内でのみ作る。exact cutoffが欠ける場合、
+直前barへずらさない。F13 profile不足は通常のwarm-up欠損、provider capability不足は
+`BLOCKED_BY_DATA_CAPABILITY`として区別する。F14 required capabilityが欠ける場合はF13へ明示的に戻し、
+欠損microstructure列を0補完してF14と称しない。当日終値は両manifestの入力に含めない。
 
 ## 22. Feature Family実験
 

@@ -16,6 +16,7 @@ from stock_ai.decision.tax import SaleTaxInput, SimpleJapanTaxEngine, TaxEstimat
 from stock_ai.domain import (
     AccountBucket,
     AccountType,
+    MorningDecisionAudit,
     PortfolioProposal,
     PortfolioState,
     Position,
@@ -139,6 +140,7 @@ class DailyPortfolioDecisionEngine:
         candidates: tuple[DecisionCandidate, ...],
         generated_at: datetime,
         model_bundle_version: str,
+        morning_audit: MorningDecisionAudit | None = None,
     ) -> PortfolioProposal:
         if generated_at.tzinfo is None or generated_at.utcoffset() is None:
             raise ValueError("generated_at must be timezone-aware")
@@ -189,6 +191,35 @@ class DailyPortfolioDecisionEngine:
                 )
         if any(candidate.prediction.as_of > portfolio.as_of for candidate in candidates):
             raise ValueError("predictions newer than the portfolio as_of cannot be used")
+        morning_predictions = tuple(
+            candidate.prediction
+            for candidate in candidates
+            if candidate.prediction.morning_revision is not None
+        )
+        if morning_predictions:
+            if len(morning_predictions) != len(candidates):
+                raise ValueError("morning and unrevised daily predictions cannot be mixed")
+            if any(prediction.as_of != portfolio.as_of for prediction in morning_predictions):
+                raise ValueError("morning predictions must match the exact portfolio freeze")
+            if morning_audit is None:
+                raise ValueError("morning predictions require immutable Decision audit lineage")
+            if morning_audit.as_of != portfolio.as_of:
+                raise ValueError("morning Decision audit must match the portfolio freeze")
+            if set(morning_audit.universe_roles) != {
+                candidate.security.symbol for candidate in candidates
+            }:
+                raise ValueError("morning Decision audit must cover the exact candidate universe")
+            if any(
+                morning_audit.reference_prices[candidate.security.symbol] != candidate.price
+                or morning_audit.average_daily_trading_values[candidate.security.symbol]
+                != candidate.average_daily_trading_value
+                for candidate in candidates
+            ):
+                raise ValueError(
+                    "morning Decision audit market data must match evaluated candidates"
+                )
+        elif morning_audit is not None:
+            raise ValueError("morning Decision audit cannot accompany unrevised daily predictions")
         prediction_provenance = {
             (
                 candidate.prediction.model_version,
@@ -269,6 +300,7 @@ class DailyPortfolioDecisionEngine:
             selected=best,
             generated_at=generated_at,
             model_bundle_version=model_bundle_version,
+            morning_audit=morning_audit,
             no_trade_reason=no_trade_reason,
         )
 
@@ -462,6 +494,7 @@ class DailyPortfolioDecisionEngine:
         selected: _Evaluation,
         generated_at: datetime,
         model_bundle_version: str,
+        morning_audit: MorningDecisionAudit | None,
         no_trade_reason: str | None,
     ) -> PortfolioProposal:
         current = portfolio.position_map()
@@ -556,6 +589,7 @@ class DailyPortfolioDecisionEngine:
             self.config.model_dump_json(),
             self.cost_engine.policy.model_dump_json(),
             self.tax_engine.policy.model_dump_json(),
+            morning_audit.model_dump_json() if morning_audit is not None else "daily",
             *(
                 f"{target.symbol}:{target.account_bucket_id}:{target.target_shares}"
                 for target in targets
@@ -580,5 +614,7 @@ class DailyPortfolioDecisionEngine:
             cost_policy_version=self.cost_engine.policy.version,
             tax_policy_id=self.tax_engine.policy.policy_id,
             tax_policy_version=self.tax_engine.policy.version,
+            morning_audit=morning_audit,
+            is_research_only=morning_audit is not None,
             no_trade_reason=no_trade_reason,
         )

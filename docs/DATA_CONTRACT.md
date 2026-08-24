@@ -130,6 +130,35 @@ provider metadata
 
 分足・気配が提供されない場合は、取得できない列を推測しない。該当実験を能力不足として記録する。
 
+Goal 4のprovider-neutral contractでは、上記に加えて最低限次を必須とする。
+
+```text
+available_at
+provider
+source_record_id
+```
+
+`volume / trading_value`は各bar区間値とし、session累積値と混同しない。09:00〜11:30 JST外のbar、
+11:30 freeze後に受信したbar、naive timestamp、symbol/timestamp重複、非有限・非正price、負volume/valueは
+publishしない。current holdingとcandidateのunionを`MorningFreezeMetadata`へ固定し、当日のbar universeと
+完全一致を検証する。freezeにはprovider、source snapshot ID、全source record IDを固定し、stock / TOPIX / sector
+barと完全一致させる。historical同時刻profile、quotes、order book、trade frequencyは独立capabilityであり、
+日足から復元しない。
+
+Morning supervised datasetとresearch reportはcontent-addressed directoryとして保存する。Dataset identityには
+ordered schema / dtype / row values、全source record ID、11:30 feature manifest、provider、capability status、
+固定JPX trading calendar全文、publication as-ofを含める。label entryは同一sessionのexact 12:30、1 / 5 / 20日endは
+その認証済みcalendar上のsessionだけを許す。timezone-awareな`label_end_at`も認証し、availabilityがその時刻より
+前なら拒否する。publication時点で未成熟のlabelは値をblankにしてstatusを残す。
+OOF reportはdaily prior / morning revision / final prediction / label endをrow単位で保存し、Parquet hashとmetadata
+hashを再読込時に検証する。
+walk-forwardの学習・較正には`label_end_date < prediction date`と`label_available_at < prediction.as_of`の両方を必須とする。
+global publication時点までに取得済みでも、各rowの11:30より後に受信したsourceはそのrowへ入れない。
+freezeのholding / candidate roleとcapability reportはfeature rowへ完全一致させる。Prediction batchからDecision Engineへは
+provider、全source snapshot / record ID、role、capability、research report ID、11:30 feature content hash、
+reference price / liquidityを落とさず渡し、実Portfolio保有と評価Candidateへ再照合し、
+Goal 4 development出力はproposalにも`research-only`として残す。
+
 ### MarketContextData
 
 ```text

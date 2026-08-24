@@ -13,6 +13,7 @@ from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Self
+from zoneinfo import ZoneInfo
 
 from pydantic import (
     BaseModel,
@@ -187,6 +188,45 @@ class PredictionUncertainty(DomainModel):
         return self.standard_error + self.model_disagreement
 
 
+class MorningPredictionRevision(DomainModel):
+    """Auditable 11:30 revision of a previously frozen daily-model prediction."""
+
+    as_of: datetime
+    prior_model_version: str = Field(min_length=1)
+    prior_feature_version: str = Field(min_length=1)
+    prior_data_snapshot_id: str = Field(min_length=1)
+    return_revision_1d: float
+    return_revision_5d: float
+    return_revision_20d: float
+    downside_quantile_revision: float
+    large_loss_probability_revision: float
+    revised_standard_error: float = Field(ge=0)
+    revised_model_disagreement: float = Field(ge=0)
+    calibration_history_rows: int = Field(ge=1)
+    model_version: str = Field(min_length=1)
+    feature_version: str = Field(min_length=1)
+    data_snapshot_id: str = Field(min_length=1)
+    capability_status: str = Field(pattern="^(AVAILABLE|PARTIAL)$")
+    is_research_only: bool = True
+
+    _validate_as_of = field_validator("as_of")(_require_aware)
+
+    @field_validator(
+        "return_revision_1d",
+        "return_revision_5d",
+        "return_revision_20d",
+        "downside_quantile_revision",
+        "large_loss_probability_revision",
+        "revised_standard_error",
+        "revised_model_disagreement",
+    )
+    @classmethod
+    def finite_revision_values(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("morning revision values must be finite")
+        return value
+
+
 class Prediction(DomainModel):
     symbol: str = Field(min_length=1)
     as_of: datetime
@@ -199,6 +239,7 @@ class Prediction(DomainModel):
     model_version: str = Field(min_length=1)
     feature_version: str = Field(min_length=1)
     data_snapshot_id: str = Field(min_length=1)
+    morning_revision: MorningPredictionRevision | None = None
 
     _validate_as_of = field_validator("as_of")(_require_aware)
 
@@ -214,6 +255,21 @@ class Prediction(DomainModel):
         if not math.isfinite(value):
             raise ValueError("prediction values must be finite")
         return value
+
+    @model_validator(mode="after")
+    def coherent_morning_revision(self) -> Self:
+        revision = self.morning_revision
+        if revision is None:
+            return self
+        if revision.as_of != self.as_of:
+            raise ValueError("morning revision as_of must equal prediction as_of")
+        if (
+            revision.model_version != self.model_version
+            or revision.feature_version != self.feature_version
+            or revision.data_snapshot_id != self.data_snapshot_id
+        ):
+            raise ValueError("morning revision provenance must match final prediction provenance")
+        return self
 
 
 class TransactionCostEstimate(DomainModel):
@@ -348,6 +404,71 @@ class ProposalLine(DomainModel):
         return self
 
 
+class MorningDecisionAudit(DomainModel):
+    """Immutable lineage attached to a research-only 11:30 proposal."""
+
+    as_of: datetime
+    provider: str = Field(min_length=1)
+    source_snapshot_ids: tuple[str, ...]
+    source_record_ids: tuple[str, ...]
+    universe_roles: Mapping[str, str]
+    capability_statuses: Mapping[str, str]
+    research_report_id: str = Field(min_length=1)
+    freeze_evidence_hash: str = Field(min_length=64, max_length=64)
+    reference_prices: Mapping[str, Money]
+    average_daily_trading_values: Mapping[str, Money]
+    is_research_only: bool = True
+
+    _validate_as_of = field_validator("as_of")(_require_aware)
+
+    @field_validator(
+        "universe_roles",
+        "capability_statuses",
+        "reference_prices",
+        "average_daily_trading_values",
+        mode="after",
+    )
+    @classmethod
+    def freeze_audit_mapping(cls, value: Mapping[str, object]) -> Mapping[str, object]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer(
+        "universe_roles",
+        "capability_statuses",
+        "reference_prices",
+        "average_daily_trading_values",
+    )
+    def serialize_audit_mapping(self, value: Mapping[str, object]) -> dict[str, object]:
+        return dict(value)
+
+    @model_validator(mode="after")
+    def exact_research_freeze(self) -> Self:
+        local = self.as_of.astimezone(ZoneInfo("Asia/Tokyo"))
+        if (local.hour, local.minute, local.second, local.microsecond) != (11, 30, 0, 0):
+            raise ValueError("morning Decision audit must use the exact 11:30 JST freeze")
+        for name, values in (
+            ("snapshot", self.source_snapshot_ids),
+            ("record", self.source_record_ids),
+        ):
+            if not values or len(values) != len(set(values)):
+                raise ValueError(f"morning source {name} IDs must be non-empty and unique")
+        if not self.universe_roles:
+            raise ValueError("morning Decision audit requires the frozen universe roles")
+        if not self.capability_statuses:
+            raise ValueError("morning Decision audit requires capability statuses")
+        universe_symbols = set(self.universe_roles)
+        if (
+            set(self.reference_prices) != universe_symbols
+            or set(self.average_daily_trading_values) != universe_symbols
+            or any(value <= 0 for value in self.reference_prices.values())
+            or any(value <= 0 for value in self.average_daily_trading_values.values())
+        ):
+            raise ValueError("morning Decision audit market data must cover the frozen universe")
+        if not self.is_research_only:
+            raise ValueError("Goal 4 morning Decision audit must remain research-only")
+        return self
+
+
 class PortfolioProposal(DomainModel):
     proposal_id: str = Field(min_length=1)
     as_of: datetime
@@ -365,6 +486,8 @@ class PortfolioProposal(DomainModel):
     cost_policy_version: str = Field(min_length=1)
     tax_policy_id: str = Field(min_length=1)
     tax_policy_version: str = Field(min_length=1)
+    morning_audit: MorningDecisionAudit | None = None
+    is_research_only: bool = False
     no_trade_reason: str | None = None
     is_order_instruction: bool = False
 
@@ -387,6 +510,11 @@ class PortfolioProposal(DomainModel):
             raise ValueError("proposal generated_at cannot precede its as_of")
         if self.net_improvement != self.proposed_utility - self.hold_utility:
             raise ValueError("proposal net improvement must equal proposed minus HOLD utility")
+        if self.morning_audit is None and self.is_research_only:
+            raise ValueError("research-only proposal requires morning Decision audit lineage")
+        if self.morning_audit is not None:
+            if not self.is_research_only or self.morning_audit.as_of != self.as_of:
+                raise ValueError("morning proposal research lineage must match proposal as_of")
         target_keys = [target.key for target in self.targets]
         line_keys = [(line.symbol, line.account_bucket_id) for line in self.lines]
         line_ids = [line.line_id for line in self.lines]
