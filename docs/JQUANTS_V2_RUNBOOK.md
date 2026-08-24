@@ -1,7 +1,7 @@
 # J-Quants V2 Data Runbook
 
 更新日: 2026-08-24
-対象: Goal 2A
+対象: Goal 2 J-Quants V2実データ基盤
 
 ## 境界
 
@@ -57,6 +57,18 @@ stock-ai data sync --date 2026-08-21 --plan light --data-root data --datasets se
 
 出力はrun ID、状態、source date、object数だけで、request headerやresponse bodyは表示しない。
 
+## 履歴取得と再開
+
+Light以上のV2 Bulkを日付範囲で取得する。
+
+```text
+stock-ai data history --start 2017-01-04 --end 2026-08-21 --plan standard --data-root data
+```
+
+Bulk Listが空、CSVがheaderだけ、rowが範囲外、品質検証に失敗した場合は成功checkpointを作らない。
+file fingerprint単位のcheckpointが`SUCCEEDED`で、紐付く全objectとfileが存在する場合だけ`--resume`でskipする。
+`RUNNING / FAILED` runや、file全体のcheckpointが未完了なobjectはPIT読取へ公開しない。
+
 ## 保存構造
 
 ```text
@@ -68,6 +80,9 @@ data/
     data.parquet
     manifest.json
   catalog.duckdb
+  features/<feature-set-version>/<snapshot-id>/
+  datasets/production/<snapshot-id>/
+  builds/production/<build-id>/
 ```
 
 各external recordは次を持つ。
@@ -89,13 +104,15 @@ manifestはParquet SHA-256、row数、schema version、品質結果を持つ。o
 
 ## Point-in-time方針
 
-Goal 2Aは`available_at = received_at`とする。これはAPIが過去訂正の実施時刻を返さないためである。
+source objectは`available_at = received_at`とする。これはAPIが過去訂正の実施時刻を返さないためである。
 
 - 初回backfillを、それ以前の予測日時で既知だった値として使わない
 - 同じpayloadの再取得は既存objectを参照して重複しない
 - 同一natural keyの内容が変われば新objectとして保存する
 - DuckDB PIT読取は`available_at <= cutoff`の最新版だけを返す
 - 初回取得以前のprovider revision historyは復元できず、capabilityは`PARTIAL`
+- Production buildはrevision policyを固定する。`SINGLE_VINTAGE_AS_REVISED`は再現可能な研究専用で採用不可、
+  `STRICT_AS_KNOWN`はreceipt時刻をavailabilityへ含め、復元不能なhistorical labelをblockする
 
 ## 株価系列
 
@@ -125,13 +142,26 @@ normalized publish前に次を検証する。
 stock-ai data verify --data-root data
 ```
 
-全manifestとParquet hashを検証する。不完全object、path不整合、hash不一致があれば非zeroで停止する。
+catalogと全manifest/Parquet hash/row数/object ID、成功Bulk checkpoint、V0/V1/Dataset、最終Build Manifestを相互照合する。
+不完全object、orphan snapshot、partial build、path/identity/hash/row数不一致、空storeは非zeroで停止する。新規の空storeを
+意図的に確認する場合だけ`--allow-empty`を付ける。
+
+Production Research artifactは次で生成・検証する。
+
+```text
+stock-ai research build --as-of 2026-08-24T11:30:00+09:00 --plan standard --data-root data
+stock-ai data verify --data-root data
+stock-ai research baseline --dataset-parquet <content-addressed-parquet> --code-commit <git-commit>
+stock-ai research e2e --as-of 2026-08-24T11:30:00+09:00 --code-commit <git-commit> --plan standard
+```
+
+baselineは隣接metadata、Parquet hash、content ID、source lineageを再検証する。任意にrenameしたParquetは受け付けない。
 
 ## 障害時
 
 - 429、500、502、503、504、network一時障害はbounded exponential retry
 - plan rate limitと`/fins/summary`個別limitの小さい方で逐次throttle
-- `Retry-After`秒を尊重する
+- `Retry-After`の秒形式とHTTP-date形式を尊重する。設定上限を超える待機要求は早期再試行せず安全にabortする
 - pagination keyの循環とpage上限を検出する
 - publish中断時は検証済み一時directoryだけを削除し、既存objectは保持する
 - DuckDBにはcredentialやresponse bodyではなく例外class名だけを`error_code`として残す
@@ -142,4 +172,5 @@ stock-ai data verify --data-root data
 - 初回取得以前の訂正vintageと完全な上場・廃止event lineageは復元できない
 - `ShOutFY`は期末開示値であり日次発行株式数ではない
 - breadthは全銘柄coverageを別途確認するまで`PARTIAL`
-- historical bulk download最適化、前場・分足、需給、TDnet、broker連携はGoal 2A対象外
+- full JPX規模ではpandas/scikit-learnのmemory gateを実データで確認するまでscale capabilityは`PARTIAL`
+- 前場・分足、需給、TDnet、broker連携はGoal 2対象外

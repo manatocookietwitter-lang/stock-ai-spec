@@ -244,6 +244,30 @@ J-Quants V2の5文字`Code`は`provider_code`として原値保存し、末尾�
 
 Free planでも安全に動く既定datasetは銘柄master、株価日足、財務summaryとする。Light以上の営業日calendarとTOPIXは明示選択する。全endpointは日付単位、逐次rate limit、`pagination_key`追跡、429/5xxのbounded retryで取得し、fixtureへのproduction fallbackは行わない。
 
+### D048 — Bulk履歴のcheckpoint境界
+
+Goal 2の履歴取得は公式J-Quants V2 `/bulk/list`・`/bulk/get`を使う。署名付きURLは保存せず、Bulk keyのhash、size、last-modifiedからfile fingerprintを作る。downloadしたCSVはprovider source dateごとに分割し、Goal 2Aと同じraw / normalized / quality pathへ通す。全date sliceのimmutable publish完了後だけfile checkpointを`SUCCEEDED`にし、`RUNNING`・`FAILED`はresume時に再取得する。
+
+### D049 — Source revision vintageと研究上の利用可能時刻を分離
+
+J-Quantsから受信したexternal recordの`available_at = received_at`はD042どおり維持し、訂正vintageのPIT境界とする。Production Research Datasetを構築する際は、このsource vintageを`source_snapshot_as_of`で固定したうえで、日足・TOPIX・集計contextを「次のJPX営業日11:30」、財務をproviderの`announced_at`で利用可能とするderived observationを別に作る。derived recordにはsourceの`revision_available_at`も残す。これは初回取得以前のprovider訂正履歴を復元するものではなく、単一取得vintageによるhistorical researchという制約を保持する。
+
+### D050 — Goal 2 research universeと欠損exit policy
+
+Goal 2の初期research universeは、各営業日のmaster snapshotに存在する東証Prime / Standard / Growth（market code 0111 / 0112 / 0113）の普通issue（5文字provider code末尾0）とする。master snapshotは営業日ごとの完全一致を必須とし、現在の構成を過去へbackfillしない。5・20日label endpointに価格がない場合は次の観測価格へずらさず、endpoint時点でuniverse外なら`DELISTED_NO_EXIT_PRICE`、universe内なら`SUSPENDED_NO_EXIT_PRICE`としてtargetを欠損にする。
+
+### D051 — 12:30 labelの能力境界
+
+正確な12:30 entry labelは、Premiumで提供されるafternoon-session adjusted openを取得できる場合だけ生成する。Standard以下、または当該列が欠損の場合は日足open/high/low/closeから推測せず`BLOCKED_BY_DATA_CAPABILITY`とする。研究用Decision Engine E2Eで前日raw closeをreference proxyとして使う場合も、12:30価格ではないことをreportへ明記する。
+
+### D052 — Corporate Actionの扱い
+
+研究価格はproviderの`AdjO/AdjH/AdjL/AdjC/AdjVo`と`AdjFactor`を使い、raw取引参照価格と分離する。`AdjFactor != 1`からeffective-date action lineageを生成し、payload hash由来のadjustment versionを保持する。daily endpointが提供しないannouncement時刻・action種別は推測せず欠損理由を残す。将来行の変更が過去特徴へ影響しないこと、分割時もadjusted系列が連続することを回帰testにする。
+
+### D053 — PIT market / sector context coverage
+
+Breadthと業種returnはcandidate集合ではなく、D050の営業日別PIT universe全体から計算する。eligible / observed issue数とcoverage ratioを保存し、既定95%未満の業種returnは欠損にする。閾値は実験設定としてversion化できるが、欠損銘柄を0 returnとして補完しない。売買停止等でsymbolの営業日観測が途切れた場合、technical rolling windowをそのgapでresetする。
+
 ## 暫定デフォルト
 
 以下は現在の仮置きで、実験・設定により変更可能。
@@ -392,3 +416,31 @@ V1 Coreは約40〜60特徴を目安にするが、同じ指標の生値・順位
 - 初回取得以前へprovider訂正値を遡及させず、`available_at = received_at`に固定
 - 同一payloadのidempotent再取得、後日訂正の別version、atomic publishを固定
 - plan / data capability不足を推測値で補わず明示状態に固定
+
+### D054 — Historical revision policyをartifactへ固定する
+
+J-Quants V2の初回backfillは、初回取得以前に存在した訂正vintageを復元できない。したがってProduction artifactは
+`SINGLE_VINTAGE_AS_REVISED`または`STRICT_AS_KNOWN`を必ず記録する。前者は再現可能なas-revised研究に限り、
+`historical_revision_status = PARTIAL`かつ`adoption_eligible = false`とする。後者ではsource receipt時刻を
+effective availabilityへ含め、復元不能なhistorical labelを`BLOCKED_BY_REVISION_HISTORY`とする。どちらも完全な
+correction-PITであるとは表示しない。
+
+### D055 — Production targetは11:30より後に開始し、holdout境界でpurgeする
+
+日足proxy targetのentryはfeature `as_of`と同じ営業日の引け、exitは固定JPX calendar上の1 / 5 / 20営業日後とする。
+前日引けから11:30までに実現済みのreturnをtargetへ含めない。locked final holdout開始日以後にlabel endが入る行は、
+feature日がholdout前でもdevelopmentから除外する。12:30 exact labelは行単位のentry/end/available_at/statusを持つ場合だけ
+利用し、Standard planでは推測しない。
+
+### D056 — Production buildは3 snapshotのatomic publication markerで完成とする
+
+V0、V1 Core、Production Datasetはそれぞれcontent-addressed directoryとしてatomic publishし、三つすべての検証後に
+Production Build Manifestを最後にatomic publishする。各snapshotは列名・dtype・値・source frame ID・manifest hashをidentityへ
+含める。`data verify`はDuckDB catalog、immutable object、Bulk checkpoint、feature/dataset snapshot、build manifestを相互照合し、
+空store、orphan snapshot、partial build、改ざんを成功扱いしない。
+
+### D057 — Goal 2の外部blockと次Goalの進行
+
+API keyが現在processへ継承されていない、契約planに必要endpointがない、providerがrevision historyを提供しない等の外部制約は
+`BLOCKED_BY_*`または`PARTIAL`としてSTATUSへ固定する。推測データで埋めず、Goal 2の独立して検証可能な実装と品質gateを完了後、
+recoverable checkpointを作り、Goal 3以降の外部制約に依存しない作業を継続する。

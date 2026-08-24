@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import csv
+import gzip
+import io
 import os
 import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -13,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from stock_ai.data.contracts import (
     ENDPOINT_SCHEMAS,
+    BulkFileDescriptor,
     DatasetName,
     FetchedPayload,
     SubscriptionPlan,
@@ -49,6 +54,9 @@ class JQuantsV2Config(BaseModel):
 
     plan: SubscriptionPlan = SubscriptionPlan.FREE
     timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    bulk_timeout_seconds: float = Field(default=300.0, gt=0, le=900)
+    maximum_bulk_file_bytes: int = Field(default=1_073_741_824, ge=1)
+    maximum_bulk_uncompressed_bytes: int = Field(default=536_870_912, ge=1)
     max_retries: int = Field(default=3, ge=0, le=8)
     maximum_retry_wait_seconds: float = Field(default=60.0, gt=0, le=300)
     maximum_pages: int = Field(default=10_000, ge=1)
@@ -188,6 +196,157 @@ class JQuantsV2Client:
             rows=tuple(rows),
         )
 
+    def list_bulk_files(
+        self,
+        dataset: DatasetName,
+        *,
+        start: date,
+        end: date,
+    ) -> tuple[BulkFileDescriptor, ...]:
+        """List official V2 Bulk files for one endpoint and a bounded date range."""
+
+        if end < start:
+            raise ValueError("bulk end date cannot precede start date")
+        if not self.config.plan.includes(SubscriptionPlan.LIGHT):
+            raise JQuantsPlanError("J-Quants V2 Bulk API requires light plan or higher")
+        schema = ENDPOINT_SCHEMAS[dataset]
+        query = {
+            "endpoint": schema.endpoint,
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+        }
+        response = self._request("/bulk/list", query, None)
+        if response.status_code == 210:
+            return ()
+        payload = self._json_object(response, "/bulk/list")
+        data = payload.get("data")
+        if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
+            raise JQuantsSchemaError("invalid J-Quants V2 data envelope for /bulk/list")
+        descriptors: list[BulkFileDescriptor] = []
+        for row in data:
+            try:
+                key = str(row["Key"])
+                size = int(row["Size"])
+                modified_text = str(row["LastModified"]).replace("Z", "+00:00")
+                last_modified = datetime.fromisoformat(modified_text)
+                if last_modified.tzinfo is None or last_modified.utcoffset() is None:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, OverflowError):
+                raise JQuantsSchemaError("invalid J-Quants V2 Bulk List record") from None
+            descriptors.append(
+                BulkFileDescriptor(
+                    dataset=dataset,
+                    endpoint=schema.endpoint,
+                    key=key,
+                    size=size,
+                    last_modified=last_modified.astimezone(UTC),
+                )
+            )
+        fingerprints = [descriptor.fingerprint for descriptor in descriptors]
+        if len(fingerprints) != len(set(fingerprints)):
+            raise JQuantsSchemaError("duplicate J-Quants V2 Bulk List record")
+        return tuple(sorted(descriptors, key=lambda item: (item.last_modified, item.key_hash)))
+
+    def fetch_bulk_file(self, descriptor: BulkFileDescriptor) -> FetchedPayload:
+        """Download and parse one signed V2 Bulk CSV without retaining its URL."""
+
+        if descriptor.size > self.config.maximum_bulk_file_bytes:
+            raise JQuantsRequestError("J-Quants V2 Bulk file exceeds configured size limit")
+        requested_at = self._aware_now()
+        response = self._request("/bulk/get", {"key": descriptor.key}, None)
+        if response.status_code == 210:
+            raise JQuantsSchemaError("J-Quants V2 Bulk Get returned no download URL")
+        payload = self._json_object(response, "/bulk/get")
+        signed_url = payload.get("url")
+        if not isinstance(signed_url, str) or not signed_url.startswith("https://"):
+            raise JQuantsSchemaError("invalid J-Quants V2 Bulk Get response")
+        body = self._download_bulk_bytes(signed_url)
+        if descriptor.size and len(body) != descriptor.size:
+            raise JQuantsRequestError("J-Quants V2 Bulk download size mismatch")
+        try:
+            uncompressed = self._bounded_bulk_uncompress(body)
+            text = uncompressed.decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(text, newline=""))
+            if reader.fieldnames is None or len(reader.fieldnames) != len(set(reader.fieldnames)):
+                raise ValueError
+            required = set(ENDPOINT_SCHEMAS[descriptor.dataset].required_columns)
+            if not required <= set(reader.fieldnames):
+                raise ValueError
+            parsed_rows: list[dict[str, str]] = []
+            for row in reader:
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError
+                parsed_rows.append({str(key): str(value) for key, value in row.items()})
+            if not parsed_rows:
+                raise ValueError
+            rows = tuple(parsed_rows)
+        except (OSError, UnicodeError, csv.Error, ValueError):
+            raise JQuantsSchemaError("invalid J-Quants V2 Bulk CSV payload") from None
+        return FetchedPayload(
+            dataset=descriptor.dataset,
+            endpoint=descriptor.endpoint,
+            query=(("bulk_fingerprint", descriptor.fingerprint),),
+            requested_at=requested_at,
+            received_at=self._aware_now(),
+            pages=1,
+            rows=rows,
+        )
+
+    def _bounded_bulk_uncompress(self, body: bytes) -> bytes:
+        limit = self.config.maximum_bulk_uncompressed_bytes
+        if not body.startswith(b"\x1f\x8b"):
+            if len(body) > limit:
+                raise JQuantsRequestError(
+                    "J-Quants V2 Bulk CSV exceeds configured uncompressed size limit"
+                )
+            return body
+        output = io.BytesIO()
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(body)) as archive:
+                while True:
+                    chunk = archive.read(min(1024 * 1024, limit - output.tell() + 1))
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    if output.tell() > limit:
+                        raise JQuantsRequestError(
+                            "J-Quants V2 Bulk CSV exceeds configured uncompressed size limit"
+                        )
+        except OSError:
+            raise JQuantsSchemaError("invalid J-Quants V2 Bulk gzip payload") from None
+        return output.getvalue()
+
+    def _download_bulk_bytes(self, signed_url: str) -> bytes:
+        retryable = {429, 500, 502, 503, 504}
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = self._http.get(
+                    signed_url,
+                    timeout=self.config.bulk_timeout_seconds,
+                    follow_redirects=True,
+                )
+            except httpx.TransportError:
+                if attempt >= self.config.max_retries:
+                    raise JQuantsRequestError(
+                        "J-Quants V2 Bulk download transport failed after retries"
+                    ) from None
+                self._sleep(self._retry_wait(attempt, None))
+                continue
+            if response.status_code == 200:
+                body = response.content
+                if len(body) > self.config.maximum_bulk_file_bytes:
+                    raise JQuantsRequestError(
+                        "J-Quants V2 Bulk file exceeds configured size limit"
+                    )
+                return body
+            if response.status_code in retryable and attempt < self.config.max_retries:
+                self._sleep(self._retry_wait(attempt, response.headers.get("Retry-After")))
+                continue
+            raise JQuantsRequestError(
+                f"J-Quants V2 Bulk download failed with HTTP {response.status_code}"
+            )
+        raise AssertionError("unreachable retry state")
+
     def _request(
         self,
         endpoint: str,
@@ -238,9 +397,23 @@ class JQuantsV2Client:
         wait = float(2**attempt)
         if retry_after is not None:
             try:
-                wait = max(wait, float(retry_after))
+                provider_wait = float(retry_after)
             except ValueError:
-                pass
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                    if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+                        raise ValueError
+                    provider_wait = max(
+                        0.0,
+                        (retry_at.astimezone(UTC) - self._aware_now()).total_seconds(),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    provider_wait = 0.0
+            if provider_wait > self.config.maximum_retry_wait_seconds:
+                raise JQuantsRequestError(
+                    "J-Quants Retry-After exceeds configured maximum; retry aborted"
+                )
+            wait = max(wait, provider_wait)
         return min(wait, self.config.maximum_retry_wait_seconds)
 
     def _aware_now(self) -> datetime:

@@ -143,12 +143,14 @@ sector contextとmarket breadthを入力し、必要capabilityが欠ける場合
 ```text
 stock-ai data capabilities --plan free
 stock-ai data sync --date 2026-08-21 --plan free --data-root data
+stock-ai data history --start 2017-01-04 --end 2026-08-21 --plan standard --data-root data
 stock-ai data verify --data-root data
+stock-ai research build --as-of 2026-08-24T11:30:00+09:00 --plan standard --data-root data
 ```
 
 Free planの既定取得は銘柄master、株価日足、財務summary。Light以上の営業日calendarとTOPIXは`--datasets`で明示する。live取得はprocess環境の`JQUANTS_API_KEY`がない場合に停止し、fixtureへfallbackしない。
 
-株価はexecution参照用raw系列とresearch用調整系列を分け、同じpayloadの再取得は重複させない。訂正値は新versionとして残す。APIが過去訂正時刻を返さないため`available_at = received_at`とし、初回取得より前の時点へbackfill値を遡及させない。詳細は`docs/JQUANTS_V2_RUNBOOK.md`を参照する。
+株価はexecution参照用raw系列とresearch用調整系列を分け、同じpayloadの再取得は重複させない。訂正値は新versionとして残す。APIが過去訂正時刻を返さないためsource objectは`available_at = received_at`とし、初回取得より前の時点へbackfill値を遡及させない。as-revised単一vintageは研究専用かつ採用不可として明示し、V0/V1/Datasetはsource-frame ID付きのatomic Build Manifestで固定する。詳細は`docs/JQUANTS_V2_RUNBOOK.md`を参照する。
 
 ## 現在のパッケージ構成
 

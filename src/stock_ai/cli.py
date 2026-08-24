@@ -2,25 +2,33 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import json
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, cast
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 import typer
 
 from stock_ai.data import (
+    DataQualityError,
     DatasetName,
     DuckDBCatalog,
+    HistoricalRevisionPolicy,
     ImmutableParquetStore,
     JQuantsError,
     JQuantsV2Client,
     JQuantsV2Config,
+    JQuantsV2HistoryIngestor,
     JQuantsV2Ingestor,
+    ProductionDataBundle,
     StorageIntegrityError,
     SubscriptionPlan,
+    build_production_data,
     capabilities_for,
 )
 from stock_ai.decision import (
@@ -34,26 +42,46 @@ from stock_ai.decision import (
     apply_executions,
 )
 from stock_ai.domain import (
+    Account,
+    AccountBucket,
+    AccountType,
+    CashState,
     ExecutionRecord,
     ExecutionStatus,
+    PortfolioState,
     Prediction,
     PredictionUncertainty,
     Security,
+    TaxState,
     TradeSide,
     UserDecision,
     UserDecisionLine,
+    WithholdingMode,
 )
-from stock_ai.features import V1_CORE_MANIFEST, FeatureEngine
+from stock_ai.features import V0_MANIFEST, V1_CORE_MANIFEST, FeatureEngine
 from stock_ai.fixtures import market_fixture, next_business_morning, portfolio_fixture
 from stock_ai.ml import (
     BaselinePredictionBundle,
+    ProductionDatasetSnapshot,
+    ProductionFeatureSets,
     PurgedExpandingWindowSplitter,
     RidgeRegressor,
+    build_production_feature_sets,
+    build_production_supervised_dataset,
     build_supervised_dataset,
+    load_production_build_manifest,
+    load_production_dataset_snapshot,
+    load_production_feature_snapshot,
     reserve_locked_final_holdout,
+    run_production_walk_forward_baselines,
     walk_forward_validate,
     write_dataset_snapshot,
+    write_production_baseline_report,
+    write_production_build_manifest,
+    write_production_dataset_snapshot,
+    write_production_feature_snapshot,
 )
+from stock_ai.research import run_research_decision_e2e
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -64,6 +92,19 @@ data_app = typer.Typer(
     help="Acquire, verify, and inspect immutable J-Quants V2 data.",
 )
 app.add_typer(data_app, name="data")
+research_app = typer.Typer(
+    no_args_is_help=True,
+    help="Build immutable real-data datasets and research-only reports/proposals.",
+)
+app.add_typer(research_app, name="research")
+
+
+@dataclass(frozen=True)
+class _ProductionArtifacts:
+    bundle: ProductionDataBundle
+    features: ProductionFeatureSets
+    dataset: pd.DataFrame
+    snapshot: ProductionDatasetSnapshot
 
 
 @app.callback()
@@ -138,12 +179,84 @@ def data_sync(
                 store=ImmutableParquetStore(data_root),
                 catalog=catalog,
             ).sync_date(source_day, datasets=selected)
-    except JQuantsError as exc:
+    except (JQuantsError, DataQualityError, StorageIntegrityError, ValueError, RuntimeError) as exc:
         typer.echo(f"ingestion blocked: {exc}", err=True)
         raise typer.Exit(code=2) from None
     typer.echo(
         f"run={result.ingestion_run_id} status={result.status.value} "
         f"source_date={result.source_date.isoformat()} objects={len(result.objects)}"
+    )
+    typer.echo("No fixture fallback was used. No securities order was submitted.")
+
+
+@data_app.command("history")
+def data_history(
+    start: Annotated[str, typer.Option(help="Inclusive source start date (YYYY-MM-DD).")],
+    end: Annotated[str, typer.Option(help="Inclusive source end date (YYYY-MM-DD).")],
+    data_root: Annotated[
+        Path,
+        typer.Option(help="Root containing immutable raw/normalized object directories."),
+    ] = Path("data"),
+    catalog_path: Annotated[
+        Path | None,
+        typer.Option(help="DuckDB catalog path; defaults below data-root."),
+    ] = None,
+    plan: Annotated[
+        SubscriptionPlan,
+        typer.Option(help="Declared plan used for Bulk access and throttling."),
+    ] = SubscriptionPlan.STANDARD,
+    datasets: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Comma-separated Bulk datasets: security_master,daily_prices,"
+                "financial_summary,trading_calendar,topix."
+            )
+        ),
+    ] = "security_master,daily_prices,financial_summary,trading_calendar,topix",
+    resume: Annotated[
+        bool,
+        typer.Option("--resume/--no-resume", help="Skip successfully checkpointed Bulk files."),
+    ] = True,
+) -> None:
+    """Acquire an official V2 Bulk history with durable file-level resume checkpoints."""
+
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+    except ValueError as exc:
+        raise typer.BadParameter("--start and --end must use YYYY-MM-DD") from exc
+    selected = _parse_datasets(datasets)
+    target_catalog = catalog_path or data_root / "catalog.duckdb"
+    try:
+        with (
+            JQuantsV2Client.from_env(config=JQuantsV2Config(plan=plan)) as client,
+            DuckDBCatalog(target_catalog) as catalog,
+        ):
+            store = ImmutableParquetStore(data_root)
+            daily_ingestor = JQuantsV2Ingestor(
+                client=client,
+                store=store,
+                catalog=catalog,
+            )
+            result = JQuantsV2HistoryIngestor(
+                client=client,
+                daily_ingestor=daily_ingestor,
+                catalog=catalog,
+            ).sync_history(
+                start_date,
+                end_date,
+                datasets=selected,
+                resume=resume,
+            )
+    except (JQuantsError, DataQualityError, StorageIntegrityError, ValueError, RuntimeError) as exc:
+        typer.echo(f"history ingestion blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"history={result.start.isoformat()}..{result.end.isoformat()} "
+        f"listed={result.listed_files} downloaded={result.downloaded_files} "
+        f"skipped={result.skipped_files} source_dates={result.ingested_source_dates} "
+        f"objects={result.objects}"
     )
     typer.echo("No fixture fallback was used. No securities order was submitted.")
 
@@ -154,20 +267,58 @@ def data_verify(
         Path,
         typer.Option(help="Root containing immutable raw/normalized object directories."),
     ] = Path("data"),
+    catalog_path: Annotated[
+        Path | None,
+        typer.Option(help="DuckDB catalog path; defaults below data-root."),
+    ] = None,
+    allow_empty: Annotated[
+        bool,
+        typer.Option(help="Explicitly allow a new store with no published objects."),
+    ] = False,
 ) -> None:
-    """Verify every published object manifest and Parquet hash."""
+    """Reconcile the catalog and every immutable object; empty is blocked by default."""
 
     store = ImmutableParquetStore(data_root)
-    manifests = sorted(data_root.glob("*/jquants_v2/*/source_date=*/*/manifest.json"))
-    verified = 0
+    target_catalog = catalog_path or data_root / "catalog.duckdb"
     try:
-        for manifest in manifests:
-            store.verify(manifest.parent)
-            verified += 1
-    except StorageIntegrityError as exc:
+        immutable_manifests = tuple(
+            data_root.glob("*/jquants_v2/*/source_date=*/*/manifest.json")
+        )
+        if target_catalog.is_file():
+            with DuckDBCatalog(target_catalog) as catalog:
+                verified = catalog.verify_integrity(store, allow_empty=True)
+        elif immutable_manifests:
+            raise StorageIntegrityError("immutable objects exist but the catalog is missing")
+        else:
+            verified = 0
+        feature_paths = sorted(data_root.glob("features/*/*/*.parquet"))
+        dataset_paths = sorted(data_root.glob("datasets/production/*/*.parquet"))
+        build_paths = sorted(data_root.glob("builds/production/*/*.json"))
+        for path in feature_paths:
+            load_production_feature_snapshot(path)
+        for path in dataset_paths:
+            load_production_dataset_snapshot(path)
+        builds = [load_production_build_manifest(path) for path in build_paths]
+        referenced_features = {
+            snapshot_path.resolve()
+            for build in builds
+            for snapshot_path in (build.v0_parquet_path, build.v1_parquet_path)
+        }
+        referenced_datasets = {build.dataset_parquet_path.resolve() for build in builds}
+        if {path.resolve() for path in feature_paths} != referenced_features:
+            raise StorageIntegrityError("production feature snapshots are not batch-complete")
+        if {path.resolve() for path in dataset_paths} != referenced_datasets:
+            raise StorageIntegrityError("production dataset snapshots are not batch-complete")
+        total = verified + len(feature_paths) + len(dataset_paths) + len(build_paths)
+        if total == 0 and not allow_empty:
+            raise StorageIntegrityError("no immutable objects or production snapshots were found")
+    except (StorageIntegrityError, RuntimeError, ValueError) as exc:
         typer.echo(f"verification failed: {exc}", err=True)
         raise typer.Exit(code=1) from None
-    typer.echo(f"verified_objects={verified} status=OK")
+    typer.echo(
+        f"verified_objects={verified} feature_snapshots={len(feature_paths)} "
+        f"dataset_snapshots={len(dataset_paths)} builds={len(build_paths)} status=OK"
+    )
 
 
 def _parse_datasets(value: str) -> tuple[DatasetName, ...]:
@@ -180,6 +331,317 @@ def _parse_datasets(value: str) -> tuple[DatasetName, ...]:
         allowed = ",".join(item.value for item in DatasetName)
         raise typer.BadParameter(f"unknown dataset; allowed values: {allowed}") from exc
     return tuple(dict.fromkeys(selected))
+
+
+def _parse_aware_timestamp(value: str, option: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise typer.BadParameter(f"{option} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise typer.BadParameter(f"{option} must include a timezone offset")
+    return parsed
+
+
+def _build_production_artifacts(
+    *,
+    data_root: Path,
+    catalog_path: Path,
+    source_snapshot_as_of: datetime,
+    plan: SubscriptionPlan,
+    minimum_market_coverage: float,
+    revision_policy: HistoricalRevisionPolicy,
+) -> _ProductionArtifacts:
+    with DuckDBCatalog(catalog_path) as catalog:
+        bundle = build_production_data(
+            catalog,
+            source_snapshot_as_of=source_snapshot_as_of,
+            minimum_market_coverage=minimum_market_coverage,
+            revision_policy=revision_policy,
+        )
+    features = build_production_feature_sets(bundle)
+    dataset, label_1230_status = build_production_supervised_dataset(
+        features.v1_core,
+        bundle,
+        plan=plan,
+    )
+    created_at = datetime.now(UTC)
+    v0_snapshot = write_production_feature_snapshot(
+        features.v0,
+        data_root / "features" / V0_MANIFEST.feature_set_version,
+        manifest=V0_MANIFEST,
+        source_snapshot_as_of=source_snapshot_as_of,
+        source_snapshot_ids=bundle.source_snapshot_ids,
+        as_of=source_snapshot_as_of,
+        created_at=created_at,
+    )
+    v1_snapshot = write_production_feature_snapshot(
+        features.v1_core,
+        data_root / "features" / V1_CORE_MANIFEST.feature_set_version,
+        manifest=V1_CORE_MANIFEST,
+        source_snapshot_as_of=source_snapshot_as_of,
+        source_snapshot_ids=bundle.source_snapshot_ids,
+        as_of=source_snapshot_as_of,
+        created_at=created_at,
+    )
+    snapshot = write_production_dataset_snapshot(
+        dataset,
+        data_root / "datasets" / "production",
+        source_snapshot_as_of=source_snapshot_as_of,
+        source_snapshot_ids=bundle.source_snapshot_ids,
+        as_of=source_snapshot_as_of,
+        created_at=created_at,
+        label_1230_status=label_1230_status,
+    )
+    write_production_build_manifest(
+        v0_snapshot,
+        v1_snapshot,
+        snapshot,
+        data_root / "builds" / "production",
+        created_at=created_at,
+    )
+    return _ProductionArtifacts(
+        bundle=bundle,
+        features=features,
+        dataset=dataset,
+        snapshot=snapshot,
+    )
+
+
+@research_app.command("build")
+def research_build(
+    as_of: Annotated[
+        str,
+        typer.Option(help="Immutable source-vintage cutoff with timezone."),
+    ],
+    data_root: Annotated[Path, typer.Option(help="Data lake root.")] = Path("data"),
+    catalog_path: Annotated[
+        Path | None,
+        typer.Option(help="DuckDB catalog; defaults below data-root."),
+    ] = None,
+    plan: Annotated[
+        SubscriptionPlan,
+        typer.Option(help="Confirmed J-Quants plan for capability decisions."),
+    ] = SubscriptionPlan.STANDARD,
+    minimum_market_coverage: Annotated[
+        float,
+        typer.Option(help="Minimum PIT-universe coverage for market/sector context."),
+    ] = 0.95,
+    revision_policy: Annotated[
+        HistoricalRevisionPolicy,
+        typer.Option(
+            help=(
+                "Historical revision policy. single-vintage results remain research-only; "
+                "strict mode blocks historical labels without provider vintages."
+            )
+        ),
+    ] = HistoricalRevisionPolicy.SINGLE_VINTAGE_AS_REVISED,
+) -> None:
+    """Build immutable V0/V1 and Production Research Dataset snapshots."""
+
+    cutoff = _parse_aware_timestamp(as_of, "--as-of")
+    try:
+        artifacts = _build_production_artifacts(
+            data_root=data_root,
+            catalog_path=catalog_path or data_root / "catalog.duckdb",
+            source_snapshot_as_of=cutoff,
+            plan=plan,
+            minimum_market_coverage=minimum_market_coverage,
+            revision_policy=revision_policy,
+        )
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"production build blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"v0_rows={len(artifacts.features.v0)} v1_rows={len(artifacts.features.v1_core)} "
+        f"dataset={artifacts.snapshot.snapshot_id} rows={artifacts.snapshot.rows} "
+        f"period={artifacts.snapshot.data_start}..{artifacts.snapshot.data_end} "
+        f"label_1230={artifacts.snapshot.label_1230_status.value}"
+    )
+
+
+@research_app.command("baseline")
+def research_baseline(
+    dataset_parquet: Annotated[
+        Path,
+        typer.Option(exists=True, dir_okay=False, help="Production Dataset Parquet path."),
+    ],
+    code_commit: Annotated[str, typer.Option(help="Exact source commit for audit provenance.")],
+    report_root: Annotated[
+        Path,
+        typer.Option(help="Immutable baseline report directory."),
+    ] = Path("artifacts/reports/baselines"),
+) -> None:
+    """Run HOLD/Momentum/Ridge real-data walk-forward without opening the holdout."""
+
+    try:
+        snapshot, dataset = load_production_dataset_snapshot(dataset_parquet)
+        report = run_production_walk_forward_baselines(
+            dataset,
+            data_snapshot_id=snapshot.snapshot_id,
+            created_at=datetime.now(UTC),
+            code_commit=code_commit,
+        )
+        path = write_production_baseline_report(report, report_root)
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"baseline blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"report={report.report_id} holdout_start={report.locked_holdout_start} path={path}"
+    )
+    for model in report.models:
+        rank_ic = "NA" if model.mean_daily_rank_ic is None else f"{model.mean_daily_rank_ic:.6f}"
+        typer.echo(
+            f"model={model.model_name} folds={model.folds} mse={model.mean_squared_error:.8f} "
+            f"rank_ic={rank_ic} rank_dates={model.rank_ic_dates}"
+        )
+
+
+@research_app.command("e2e")
+def research_e2e(
+    as_of: Annotated[str, typer.Option(help="Immutable source-vintage cutoff with timezone.")],
+    code_commit: Annotated[str, typer.Option(help="Exact source commit for audit provenance.")],
+    data_root: Annotated[Path, typer.Option(help="Data lake root.")] = Path("data"),
+    catalog_path: Annotated[
+        Path | None,
+        typer.Option(help="DuckDB catalog; defaults below data-root."),
+    ] = None,
+    report_root: Annotated[
+        Path,
+        typer.Option(help="Research report root."),
+    ] = Path("artifacts/reports"),
+    plan: Annotated[SubscriptionPlan, typer.Option(help="Confirmed J-Quants plan.")] = (
+        SubscriptionPlan.STANDARD
+    ),
+    cash_yen: Annotated[
+        float,
+        typer.Option(help="Explicit paper cash balance; no broker connection."),
+    ] = 1_000_000.0,
+    candidate_limit: Annotated[
+        int,
+        typer.Option(help="Bounded candidate count for exact portfolio search."),
+    ] = 8,
+    minimum_market_coverage: Annotated[
+        float,
+        typer.Option(help="Minimum PIT-universe context coverage."),
+    ] = 0.95,
+    revision_policy: Annotated[
+        HistoricalRevisionPolicy,
+        typer.Option(help="Explicit historical source-revision policy."),
+    ] = HistoricalRevisionPolicy.SINGLE_VINTAGE_AS_REVISED,
+) -> None:
+    """Run real data -> baseline -> paper proposal; never submit or simulate an order."""
+
+    cutoff = _parse_aware_timestamp(as_of, "--as-of")
+    try:
+        artifacts = _build_production_artifacts(
+            data_root=data_root,
+            catalog_path=catalog_path or data_root / "catalog.duckdb",
+            source_snapshot_as_of=cutoff,
+            plan=plan,
+            minimum_market_coverage=minimum_market_coverage,
+            revision_policy=revision_policy,
+        )
+        report = run_production_walk_forward_baselines(
+            artifacts.dataset,
+            data_snapshot_id=artifacts.snapshot.snapshot_id,
+            created_at=datetime.now(UTC),
+            code_commit=code_commit,
+        )
+        baseline_path = write_production_baseline_report(
+            report,
+            report_root / "baselines",
+        )
+        latest_date = artifacts.features.v1_core["trading_date"].max()
+        latest = artifacts.features.v1_core.loc[
+            artifacts.features.v1_core["trading_date"] == latest_date
+        ].copy()
+        portfolio_as_of = pd.Timestamp(latest["available_at"].max()).to_pydatetime()
+        account = Account(account_id="research", broker="manual", display_name="Research")
+        bucket = AccountBucket(
+            bucket_id="research-taxable",
+            account_id=account.account_id,
+            account_type=AccountType.TAXABLE_SPECIFIED,
+            withholding_mode=WithholdingMode.WITHHOLDING,
+            fee_policy_id="research-cost-v1",
+            tax_policy_id="research-tax-v1",
+        )
+        portfolio = PortfolioState(
+            portfolio_id=f"paper-cash-{artifacts.snapshot.snapshot_id[:12]}",
+            as_of=portfolio_as_of,
+            accounts=(account,),
+            account_buckets=(bucket,),
+            positions=(),
+            cash=(
+                CashState(
+                    account_bucket_id=bucket.bucket_id,
+                    available_cash=Decimal(str(cash_yen)),
+                ),
+            ),
+            tax_states=(
+                TaxState(account_bucket_id=bucket.bucket_id, tax_year=portfolio_as_of.year),
+            ),
+        )
+        engine = DailyPortfolioDecisionEngine(
+            config=DecisionEngineConfig(maximum_positions=min(candidate_limit, 10)),
+            cost_engine=TransactionCostEngine(
+                CostPolicy(
+                    policy_id="research-cost-v1",
+                    version="research-cost-v1",
+                    zero_commission_confirmed=True,
+                    full_spread_bps=Decimal("10"),
+                    slippage_bps=Decimal("5"),
+                    impact_bps_at_full_adv=Decimal("10"),
+                )
+            ),
+            tax_engine=SimpleJapanTaxEngine(
+                TaxPolicy(
+                    policy_id="research-tax-v1",
+                    version="research-tax-v1",
+                    effective_from=portfolio_as_of.date().replace(month=1, day=1),
+                )
+            ),
+        )
+        decision = run_research_decision_e2e(
+            dataset=artifacts.dataset,
+            latest_features=latest,
+            universe=artifacts.bundle.universe,
+            data_snapshot_id=artifacts.snapshot.snapshot_id,
+            baseline_report=report,
+            portfolio=portfolio,
+            engine=engine,
+            candidate_limit=candidate_limit,
+        )
+        proposal_directory = report_root / "proposals"
+        proposal_directory.mkdir(parents=True, exist_ok=True)
+        proposal_path = proposal_directory / f"{decision.proposal.proposal_id}.research.json"
+        envelope = {
+            "data_snapshot_id": artifacts.snapshot.snapshot_id,
+            "baseline_report_id": report.report_id,
+            "reference_price_rule": decision.reference_price_rule,
+            "is_order_instruction": False,
+            "proposal": decision.proposal.model_dump(mode="json"),
+        }
+        proposal_payload = (
+            json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        )
+        if proposal_path.exists():
+            if proposal_path.read_text(encoding="utf-8") != proposal_payload:
+                raise RuntimeError("existing research proposal identity collision")
+        else:
+            temporary = proposal_directory / f".{proposal_path.name}.{uuid4().hex}.tmp"
+            temporary.write_text(proposal_payload, encoding="utf-8")
+            temporary.replace(proposal_path)
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"research E2E blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"dataset={artifacts.snapshot.snapshot_id} baseline={report.report_id} "
+        f"proposal={decision.proposal.proposal_id} candidates={decision.candidate_count}"
+    )
+    typer.echo(f"baseline_path={baseline_path} proposal_path={proposal_path}")
+    typer.echo(decision.reference_price_rule)
+    typer.echo("RESEARCH ONLY - no order or execution record was created or submitted.")
 
 
 @app.command("fixture-demo")

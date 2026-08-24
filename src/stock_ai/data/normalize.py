@@ -209,11 +209,17 @@ def _daily_prices(frame: pd.DataFrame, payload_hash: str) -> pd.DataFrame:
                 "research_low",
                 "research_close",
                 "research_volume",
+                "morning_close",
+                "research_morning_close",
+                "afternoon_open",
+                "research_afternoon_open",
                 "adjustment_version",
             ]
         )
     codes = frame["Code"].astype(str)
     def numeric(column: str) -> pd.Series[Any]:
+        if column not in frame:
+            return pd.Series([float("nan")] * len(frame), dtype="float64")
         return pd.to_numeric(frame[column], errors="coerce")
     return pd.DataFrame(
         {
@@ -232,6 +238,10 @@ def _daily_prices(frame: pd.DataFrame, payload_hash: str) -> pd.DataFrame:
             "research_low": numeric("AdjL"),
             "research_close": numeric("AdjC"),
             "research_volume": numeric("AdjVo"),
+            "morning_close": numeric("MC"),
+            "research_morning_close": numeric("MAdjC"),
+            "afternoon_open": numeric("AO"),
+            "research_afternoon_open": numeric("AAdjO"),
             "adjustment_version": payload_hash,
         }
     )
@@ -287,6 +297,8 @@ def _financial_summary(frame: pd.DataFrame) -> pd.DataFrame:
         "eps",
         "total_assets",
         "equity",
+        "bps",
+        "provider_roe",
         "shares_outstanding_fy",
         "treasury_shares_fy",
         "forecast_sales",
@@ -327,6 +339,8 @@ def _financial_summary(frame: pd.DataFrame) -> pd.DataFrame:
             "eps": numeric("EPS"),
             "total_assets": numeric("TA"),
             "equity": numeric("Eq"),
+            "bps": numeric("BPS"),
+            "provider_roe": numeric("ROE"),
             "shares_outstanding_fy": numeric("ShOutFY"),
             "treasury_shares_fy": numeric("TrShFY"),
             "forecast_sales": numeric("FSales"),

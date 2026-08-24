@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
@@ -52,6 +53,13 @@ class CapabilityStatus(StrEnum):
     BLOCKED_BY_PLAN = "BLOCKED_BY_PLAN"
     BLOCKED_BY_DATA_CAPABILITY = "BLOCKED_BY_DATA_CAPABILITY"
     OUT_OF_SCOPE = "OUT_OF_SCOPE"
+
+
+class HistoricalRevisionPolicy(StrEnum):
+    """How a fixed provider vintage may be used in historical research."""
+
+    SINGLE_VINTAGE_AS_REVISED = "SINGLE_VINTAGE_AS_REVISED"
+    STRICT_AS_KNOWN = "STRICT_AS_KNOWN"
 
 
 class Capability(DataContractModel):
@@ -192,6 +200,40 @@ class FetchedPayload(DataContractModel):
         return self
 
 
+class BulkFileDescriptor(DataContractModel):
+    """Metadata returned by the V2 Bulk List API without a signed download URL."""
+
+    dataset: DatasetName
+    endpoint: str
+    key: str = Field(min_length=1, repr=False)
+    size: int = Field(ge=0)
+    last_modified: datetime
+
+    @field_validator("last_modified")
+    @classmethod
+    def bulk_timestamp_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bulk last_modified must be timezone-aware")
+        return value
+
+    @property
+    def key_hash(self) -> str:
+        return hashlib.sha256(self.key.encode("utf-8")).hexdigest()
+
+    @property
+    def fingerprint(self) -> str:
+        payload = "|".join(
+            (
+                self.dataset.value,
+                self.endpoint,
+                self.key_hash,
+                str(self.size),
+                self.last_modified.isoformat(),
+            )
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class QualitySeverity(StrEnum):
     WARNING = "WARNING"
     ERROR = "ERROR"
@@ -269,6 +311,19 @@ class IngestionResult(DataContractModel):
     capabilities: tuple[Capability, ...]
 
 
+class HistorySyncResult(DataContractModel):
+    """Bounded summary of a resumable Bulk history run."""
+
+    start: date
+    end: date
+    datasets: tuple[DatasetName, ...]
+    listed_files: int = Field(ge=0)
+    downloaded_files: int = Field(ge=0)
+    skipped_files: int = Field(ge=0)
+    ingested_source_dates: int = Field(ge=0)
+    objects: int = Field(ge=0)
+
+
 def capabilities_for(plan: SubscriptionPlan) -> tuple[Capability, ...]:
     """Return an explicit, fail-closed capability table for Goal 2A."""
 
@@ -303,6 +358,21 @@ def capabilities_for(plan: SubscriptionPlan) -> tuple[Capability, ...]:
     capabilities.extend(
         (
             Capability(
+                name="bulk_history",
+                status=(
+                    CapabilityStatus.AVAILABLE
+                    if plan.includes(SubscriptionPlan.LIGHT)
+                    else CapabilityStatus.BLOCKED_BY_PLAN
+                ),
+                source_endpoint="/bulk/list + /bulk/get",
+                minimum_plan=SubscriptionPlan.LIGHT,
+                reason=(
+                    None
+                    if plan.includes(SubscriptionPlan.LIGHT)
+                    else "official V2 Bulk history requires light plan or higher"
+                ),
+            ),
+            Capability(
                 name="shares_outstanding",
                 status=CapabilityStatus.PARTIAL,
                 source_endpoint=ENDPOINT_SCHEMAS[DatasetName.FINANCIAL_SUMMARY].endpoint,
@@ -335,6 +405,21 @@ def capabilities_for(plan: SubscriptionPlan) -> tuple[Capability, ...]:
                 ),
                 minimum_plan=SubscriptionPlan.STANDARD,
                 reason="Goal 2A does not ingest Standard/Premium supply-demand endpoints",
+            ),
+            Capability(
+                name="exact_1230_entry_label",
+                status=(
+                    CapabilityStatus.AVAILABLE
+                    if plan.includes(SubscriptionPlan.PREMIUM)
+                    else CapabilityStatus.BLOCKED_BY_PLAN
+                ),
+                source_endpoint=ENDPOINT_SCHEMAS[DatasetName.DAILY_PRICES].endpoint,
+                minimum_plan=SubscriptionPlan.PREMIUM,
+                reason=(
+                    None
+                    if plan.includes(SubscriptionPlan.PREMIUM)
+                    else "exact afternoon-session open fields require premium plan"
+                ),
             ),
             Capability(
                 name="intraday_morning",

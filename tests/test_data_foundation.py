@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import duckdb
 import httpx
 import pandas as pd
 import pytest
@@ -67,9 +68,10 @@ def test_fixture_integration_publishes_all_goal2a_datasets(
         ) as client,
         DuckDBCatalog(tmp_path / "catalog.duckdb") as catalog,
     ):
+        store = ImmutableParquetStore(tmp_path / "lake")
         ingestor = JQuantsV2Ingestor(
             client=client,
-            store=ImmutableParquetStore(tmp_path / "lake"),
+            store=store,
             catalog=catalog,
             now=clock.now,
             run_id_factory=lambda _day: "integration-run",
@@ -89,6 +91,7 @@ def test_fixture_integration_publishes_all_goal2a_datasets(
         assert daily.loc[0, "research_close"] == 1250.0
         assert daily.loc[0, "symbol"] == "7203"
         assert daily.loc[0, "available_at"] == daily.loc[0, "received_at"]
+        assert catalog.verify_integrity(store) == 2 * len(ALL_DATASETS)
 
     for path in tmp_path.rglob("*"):
         if path.is_file():
@@ -243,6 +246,46 @@ def test_quality_failure_keeps_raw_and_does_not_publish_normalized(
         assert catalog.run_status("bad-run") == ("FAILED", "DataQualityError")
 
 
+def test_failed_multi_dataset_run_is_not_visible_to_point_in_time_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JQUANTS_API_KEY", _credential())
+    clock = AdvancingClock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/equities/bars/daily":
+            return httpx.Response(200, json={"data": [_daily_row(2500.0)]})
+        return httpx.Response(200, json={"data": [{"Date": "2026-08-21"}]})
+
+    run_ids = iter(("partial-run", "recovery-run"))
+    with (
+        JQuantsV2Client.from_env(
+            transport=httpx.MockTransport(handler),
+            sleep=lambda _seconds: None,
+            monotonic=clock.monotonic,
+            now=clock.now,
+        ) as client,
+        DuckDBCatalog(tmp_path / "catalog.duckdb") as catalog,
+    ):
+        ingestor = JQuantsV2Ingestor(
+            client=client,
+            store=ImmutableParquetStore(tmp_path / "lake"),
+            catalog=catalog,
+            now=clock.now,
+            run_id_factory=lambda _day: next(run_ids),
+        )
+        with pytest.raises(DataQualityError):
+            ingestor.sync_date(
+                date(2026, 8, 21),
+                datasets=(DatasetName.DAILY_PRICES, DatasetName.SECURITY_MASTER),
+            )
+        assert catalog.point_in_time(DatasetName.DAILY_PRICES, clock.now()).empty
+
+        ingestor.sync_date(date(2026, 8, 21), datasets=(DatasetName.DAILY_PRICES,))
+        assert len(catalog.point_in_time(DatasetName.DAILY_PRICES, clock.now())) == 1
+
+
 def test_store_detects_tampering(tmp_path: Path) -> None:
     fixed = datetime(2026, 8, 24, tzinfo=UTC)
     store = ImmutableParquetStore(tmp_path / "lake")
@@ -264,6 +307,82 @@ def test_store_detects_tampering(tmp_path: Path) -> None:
         stream.write(b"tamper")
     with pytest.raises(StorageIntegrityError, match="hash mismatch"):
         store.verify(stored.parquet_path.parent)
+
+
+def test_store_detects_manifest_identity_and_row_count_tampering(tmp_path: Path) -> None:
+    fixed = datetime(2026, 8, 24, tzinfo=UTC)
+    store = ImmutableParquetStore(tmp_path / "lake")
+    stored = store.write(
+        kind=ObjectKind.RAW,
+        dataset=DatasetName.TOPIX,
+        source_date=date(2026, 8, 21),
+        frame=pd.DataFrame({"close": [3100.0]}),
+        payload_hash="d" * 64,
+        schema_version="test-v1",
+        source_endpoint="/indices/bars/daily/topix",
+        received_at=fixed,
+        available_at=fixed,
+        as_of=fixed,
+        ingestion_run_id="run-identity",
+        quality=QualityReport(dataset=DatasetName.TOPIX, rows=1),
+    )
+    original = stored.manifest_path.read_text(encoding="utf-8")
+    identity_tamper = stored.model_copy(update={"schema_version": "other-v1"})
+    stored.manifest_path.write_text(identity_tamper.model_dump_json(indent=2), encoding="utf-8")
+    with pytest.raises(StorageIntegrityError, match="manifest identity mismatch"):
+        store.verify(stored.parquet_path.parent)
+
+    stored.manifest_path.write_text(original, encoding="utf-8")
+    row_tamper = stored.model_copy(update={"rows": 2})
+    stored.manifest_path.write_text(row_tamper.model_dump_json(indent=2), encoding="utf-8")
+    with pytest.raises(StorageIntegrityError, match="row count mismatch"):
+        store.verify(stored.parquet_path.parent)
+
+
+def test_catalog_path_tampering_fails_integrity_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JQUANTS_API_KEY", _credential())
+    clock = AdvancingClock()
+    catalog_path = tmp_path / "lake" / "catalog.duckdb"
+    store = ImmutableParquetStore(tmp_path / "lake")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [_daily_row(2500.0)]})
+
+    with (
+        JQuantsV2Client.from_env(
+            transport=httpx.MockTransport(handler),
+            sleep=lambda _seconds: None,
+            monotonic=clock.monotonic,
+            now=clock.now,
+        ) as client,
+        DuckDBCatalog(catalog_path) as catalog,
+    ):
+        JQuantsV2Ingestor(
+            client=client,
+            store=store,
+            catalog=catalog,
+            now=clock.now,
+        ).sync_date(date(2026, 8, 21), datasets=(DatasetName.DAILY_PRICES,))
+        assert catalog.verify_integrity(store) == 2
+
+    with duckdb.connect(str(catalog_path)) as connection:
+        current = connection.execute(
+            "SELECT parquet_path FROM stored_objects ORDER BY object_id LIMIT 1"
+        ).fetchone()
+        assert current is not None
+        wrong_path = str(Path(str(current[0])).with_name("wrong.parquet"))
+        connection.execute(
+            "UPDATE stored_objects SET parquet_path = ? WHERE object_id = "
+            "(SELECT object_id FROM stored_objects ORDER BY object_id LIMIT 1)",
+            [wrong_path],
+        )
+
+    with DuckDBCatalog(catalog_path) as catalog:
+        with pytest.raises(StorageIntegrityError, match="catalog paths"):
+            catalog.verify_integrity(store)
 
 
 def test_quality_checks_block_bad_schema_duplicates_and_prices() -> None:
@@ -291,6 +410,17 @@ def test_quality_checks_block_bad_schema_duplicates_and_prices() -> None:
 
         require_quality(duplicate_report)
 
+    nonnumeric_volume = _daily_row(2500.0)
+    nonnumeric_volume["Vo"] = "not-a-number"
+    volume_report = validate_rows(
+        DatasetName.DAILY_PRICES,
+        (nonnumeric_volume,),
+        requested_source_date=date(2026, 8, 21),
+    )
+    assert "INVALID_VOLUME_OR_TRADING_VALUE" in {
+        issue.code for issue in volume_report.issues
+    }
+
 
 def test_capabilities_fail_closed_by_declared_plan() -> None:
     capabilities = {item.name: item for item in capabilities_for(SubscriptionPlan.FREE)}
@@ -298,6 +428,16 @@ def test_capabilities_fail_closed_by_declared_plan() -> None:
     assert capabilities["topix_context"].status is CapabilityStatus.BLOCKED_BY_PLAN
     assert capabilities["shares_outstanding"].status is CapabilityStatus.PARTIAL
     assert capabilities["intraday_morning"].status is CapabilityStatus.OUT_OF_SCOPE
+    assert capabilities["bulk_history"].status is CapabilityStatus.BLOCKED_BY_PLAN
+    standard = {
+        item.name: item for item in capabilities_for(SubscriptionPlan.STANDARD)
+    }
+    assert standard["bulk_history"].status is CapabilityStatus.AVAILABLE
+    assert (
+        standard["exact_1230_entry_label"].status is CapabilityStatus.BLOCKED_BY_PLAN
+    )
+    premium = {item.name: item for item in capabilities_for(SubscriptionPlan.PREMIUM)}
+    assert premium["exact_1230_entry_label"].status is CapabilityStatus.AVAILABLE
 
 
 def test_payload_identity_is_independent_of_response_row_order() -> None:

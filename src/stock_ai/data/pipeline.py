@@ -9,6 +9,7 @@ from uuid import uuid4
 from stock_ai.data.contracts import (
     ENDPOINT_SCHEMAS,
     DatasetName,
+    FetchedPayload,
     IngestionResult,
     IngestionStatus,
     ObjectKind,
@@ -59,16 +60,58 @@ class JQuantsV2Ingestor:
         *,
         datasets: Iterable[DatasetName] = DEFAULT_DATASETS,
     ) -> IngestionResult:
-        selected = tuple(dict.fromkeys(datasets))
-        if not selected:
-            raise ValueError("at least one dataset must be selected")
+        selected = self._selected_datasets(datasets)
+        return self._sync_payload_provider(
+            source_date,
+            selected,
+            self.client.fetch_date,
+        )
+
+    def ingest_payloads(
+        self,
+        source_date: date,
+        payloads: Iterable[FetchedPayload],
+        *,
+        bulk_fingerprint: str | None = None,
+    ) -> IngestionResult:
+        """Ingest already-downloaded Bulk payload slices through the same safe path."""
+
+        payload_by_dataset: dict[DatasetName, FetchedPayload] = {}
+        for payload in payloads:
+            if payload.dataset in payload_by_dataset:
+                raise ValueError(f"duplicate payload for {payload.dataset.value}")
+            expected_endpoint = ENDPOINT_SCHEMAS[payload.dataset].endpoint
+            if payload.endpoint != expected_endpoint:
+                raise ValueError(f"unexpected source endpoint for {payload.dataset.value}")
+            payload_by_dataset[payload.dataset] = payload
+        selected = self._selected_datasets(payload_by_dataset)
+        return self._sync_payload_provider(
+            source_date,
+            selected,
+            lambda dataset, _day: payload_by_dataset[dataset],
+            bulk_fingerprint=bulk_fingerprint,
+        )
+
+    def _sync_payload_provider(
+        self,
+        source_date: date,
+        selected: tuple[DatasetName, ...],
+        payload_provider: Callable[[DatasetName, date], FetchedPayload],
+        *,
+        bulk_fingerprint: str | None = None,
+    ) -> IngestionResult:
         run_id = self._run_id_factory(source_date)
         started_at = self._aware_now()
-        self.catalog.begin_run(run_id, source_date, started_at)
+        self.catalog.begin_run(
+            run_id,
+            source_date,
+            started_at,
+            bulk_fingerprint=bulk_fingerprint,
+        )
         stored_objects: list[StoredObject] = []
         try:
             for dataset in selected:
-                payload = self.client.fetch_date(dataset, source_date)
+                payload = payload_provider(dataset, source_date)
                 observed_as_of = max(self._aware_now(), payload.received_at)
                 payload_hash = canonical_payload_hash(payload.rows)
                 quality = validate_rows(
@@ -145,6 +188,13 @@ class JQuantsV2Ingestor:
                 error_code=type(exc).__name__,
             )
             raise
+
+    @staticmethod
+    def _selected_datasets(datasets: Iterable[DatasetName]) -> tuple[DatasetName, ...]:
+        selected = tuple(dict.fromkeys(datasets))
+        if not selected:
+            raise ValueError("at least one dataset must be selected")
+        return selected
 
     def sync_range(
         self,

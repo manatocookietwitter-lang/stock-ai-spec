@@ -35,7 +35,6 @@ DAILY_REQUIRED: Final = {
     "adjusted_close",
     "adjusted_volume",
     "close",
-    "shares_outstanding",
     "trading_value",
 }
 MARKET_REQUIRED: Final = {
@@ -80,6 +79,20 @@ def _require_finite_numeric(
 
 
 def _compute_symbol(group: pd.DataFrame) -> pd.DataFrame:
+    group = group.sort_values("trading_date").copy()
+    if "trading_session_index" not in group:
+        return _compute_contiguous_symbol(group)
+    session_index = pd.to_numeric(group["trading_session_index"], errors="coerce")
+    if session_index.isna().any():
+        raise ValueError("trading_session_index must be present for every production row")
+    segment = session_index.diff().ne(1).cumsum()
+    return pd.concat(
+        [_compute_contiguous_symbol(part) for _, part in group.groupby(segment, sort=False)],
+        ignore_index=True,
+    )
+
+
+def _compute_contiguous_symbol(group: pd.DataFrame) -> pd.DataFrame:
     group = group.sort_values("trading_date").copy()
     close = group["adjusted_close"].astype(float)
     high = group["adjusted_high"].astype(float)
@@ -146,7 +159,11 @@ def _compute_symbol(group: pd.DataFrame) -> pd.DataFrame:
     output["volume.ratio_5_60"] = (
         volume.rolling(5, min_periods=5).mean() / volume.rolling(60, min_periods=60).mean()
     )
-    turnover = volume / group["shares_outstanding"].astype(float)
+    if "shares_outstanding" in group:
+        shares = pd.to_numeric(group["shares_outstanding"], errors="coerce")
+    else:
+        shares = pd.Series(np.nan, index=group.index, dtype="float64")
+    turnover = volume / shares
     output["liquidity.turnover_20d"] = turnover.rolling(20, min_periods=20).mean()
     on_balance_volume = obv(close, volume)
     output["volume.obv_slope_5d"] = (
@@ -241,22 +258,39 @@ class FeatureEngine:
             raise ValueError(
                 "BLOCKED_BY_DATA_CAPABILITY: no completed daily bars are available at as_of"
             )
+        requires_shares = "liquidity.turnover_20d" in self.manifest.feature_names
+        if requires_shares and "shares_outstanding" not in safe_daily:
+            raise ValueError(
+                "BLOCKED_BY_DATA_CAPABILITY: V1 turnover requires shares_outstanding history"
+            )
         daily_numeric = (
             "adjusted_high",
             "adjusted_low",
             "adjusted_close",
             "adjusted_volume",
             "close",
-            "shares_outstanding",
             "trading_value",
         )
         _require_finite_numeric(safe_daily, daily_numeric, "daily market data")
+        if "shares_outstanding" in safe_daily:
+            _require_finite_numeric(
+                safe_daily,
+                ("shares_outstanding",),
+                "daily market data",
+                allow_missing=True,
+            )
+            observed_shares = pd.to_numeric(safe_daily["shares_outstanding"], errors="coerce")
+            if (observed_shares.dropna() <= 0).any():
+                raise ValueError("observed shares outstanding must be strictly positive")
+            if requires_shares and observed_shares.notna().sum() == 0:
+                raise ValueError(
+                    "BLOCKED_BY_DATA_CAPABILITY: no point-in-time shares outstanding are available"
+                )
         positive_columns = (
             "adjusted_high",
             "adjusted_low",
             "adjusted_close",
             "close",
-            "shares_outstanding",
         )
         if any((pd.to_numeric(safe_daily[column]) <= 0).any() for column in positive_columns):
             raise ValueError("daily prices and shares outstanding must be strictly positive")

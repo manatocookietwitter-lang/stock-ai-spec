@@ -157,16 +157,23 @@ def _validate_daily_prices(frame: pd.DataFrame) -> list[QualityIssue]:
     for prefix in ("", "Adj"):
         issues.extend(_validate_ohlc(frame, prefix=prefix))
 
-    volume = pd.to_numeric(frame["Vo"], errors="coerce")
-    adjusted_volume = pd.to_numeric(frame["AdjVo"], errors="coerce")
+    volume_columns = ("Vo", "AdjVo", "Va")
+    volume_values = _numeric(frame, volume_columns)
+    volume_provided = frame.loc[:, list(volume_columns)].notna() & (
+        frame.loc[:, list(volume_columns)] != ""
+    )
+    invalid_volume = (
+        (volume_provided & volume_values.isna()).any(axis=1)
+        | (volume_values.notna() & ~np.isfinite(volume_values)).any(axis=1)
+        | (volume_values < 0).any(axis=1)
+    )
     factor = pd.to_numeric(frame["AdjFactor"], errors="coerce")
-    invalid_volume = (volume < 0) | (adjusted_volume < 0)
     if invalid_volume.any():
         issues.append(
             QualityIssue(
-                code="NEGATIVE_VOLUME",
+                code="INVALID_VOLUME_OR_TRADING_VALUE",
                 severity=QualitySeverity.ERROR,
-                message="raw and adjusted volume must be non-negative",
+                message="raw/adjusted volume and trading value must be finite and non-negative",
                 rows_affected=int(invalid_volume.sum()),
             )
         )
