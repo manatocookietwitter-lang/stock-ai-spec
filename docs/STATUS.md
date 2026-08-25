@@ -434,7 +434,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 ## Checkpoint後の継続順
 
-1. Goal 2 checkpoint `269d720`、Goal 3 checkpoint `949502b`、Goal 4 checkpoint `f7c1709`は作成済み。
+1. Goal 2 checkpoint `f5763e7`、Goal 3 checkpoint `d9b094b`、Goal 4 checkpoint `a2a359d`は作成済み。
 2. Goal 5の全gateとread-only reviewは完了し、このSTATUSを含む外部依存外のclean checkpointを正本とする。
 3. Standard相当Bulkの2017-01-04〜2020-12-30はcheckpoint / resume取得済み。次回は2021-01-01から契約上の最新確定営業日まで年次stageを継続する。
 4. 全取得期間の`data verify`、Production Dataset、Goal 3 development選定と固定、locked holdout単回評価、Goal 4 live OOS、Goal 5 live Paper観測の順に実行し、live-data acceptanceとmodel採否を追記する。
