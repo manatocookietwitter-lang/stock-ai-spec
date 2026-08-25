@@ -581,3 +581,18 @@ Calendarだけは要求`start / end`をfile fingerprintのcheckpoint scopeへ含
 
 Production buildはCalendar全体をmaster / daily prices / TOPIXの共通する連続coverageへ境界化し、境界内部でどれか1系統の
 営業日が欠ければ日付を黙って落とさず`BLOCKED_BY_DATA_CAPABILITY`にする。
+
+### D066 — ホスト版は本人限定の運用確認面とし、local実データ基盤を置き換えない
+
+ユーザーのremote URL要望を受け、Goal 5 localhost PWAとは別に、ChatGPT sign-inとSites access policyで
+所有者本人だけが利用するホスト版control roomを設ける。これは公開マルチユーザー投資助言サービスではなく、
+実データ準備状況、安全停止理由、no-order境界を確認する補助面である。broker接続、注文送信、変更、取消は実装しない。
+
+`JQUANTS_API_KEY`、`data/live`、Production Dataset、model artifact、実口座・NISA・税状態CSVはホスト版へ送信しない。
+ホスト版D1が保存できるのは認証済みuser IDに紐づく安全境界の確認状態など、機密な市場・口座dataではない
+最小の運用metadataに限る。実データ・model・提案の正本は引き続きlocal append-only台帳と認証済みartifactであり、
+安全な同期contractを別途承認・実装するまでホスト版は提案を生成せず、前日提案やfixtureを表示しない。
+
+Sites deploymentはowner-only accessを既定とする。Internet公開、workspace全体共有、外部viewer追加は
+別の明示承認なしに行わない。localhost FastAPIをreverse proxyでInternetへ公開せず、ホスト版workerから
+local serviceへ到達させるための推測tunnelや代替APIも採用しない。

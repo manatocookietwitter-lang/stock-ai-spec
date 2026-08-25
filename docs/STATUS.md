@@ -293,6 +293,21 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 
 ## 検証結果
 
+### 2026-08-26 認証付きホスト版checkpoint
+
+- ユーザーのremote URL要望を受け、既存localhost PWAを直接公開せず、`hosted/`へ本人限定のSites companionを実装
+- ChatGPT sign-inのforwarded user headerをserver側で読み、D1にはuser別の安全境界確認状態だけを保存
+- J-Quants API key、`data/live`、Production Dataset、model artifact、実口座CSVをホスト版へ送信する経路は設けていない
+- 実データ不足時は`NO PROPOSAL`と不足理由を表示し、fixture、前日提案、推測値へfallbackしない
+- no-order、no-broker、local credential境界、2017〜2020受入済み／2021年以降未取得の現状を画面へ明示
+- D1 migration `operator_settings`、owner-scoped server action、mobile-first画面、OG preview assetを追加
+- Next.js 16.3.2、React 19.2.8、vinext beta.8、Vite 8.2.2、Cloudflare plugin 1.53.1へ更新
+- `npm run lint`: pass
+- `npm run build`: pass
+- `npm audit --omit=dev --json`: vulnerability 0
+- `npm audit --json`: development dependencyを含めvulnerability 0
+- Sites `create_site`は一度だけ呼び出したが、connectorはproject IDを返さず、その後の`list_sites`も0件。重複作成を避け、remote deploymentは外部control-plane確認待ち
+
 ### 2026-08-25 実データ受け入れ中間checkpoint
 
 - 現processで`JQUANTS_API_KEY`設定済みをboolean確認。credential値は表示・保存していない
@@ -416,7 +431,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - OOF ensembleの不確実性は日付内rank space。絶対return金額幅へのcalibrationはlive OOSが得られるまで未採用
 - Goal 4 refit bundleとcurrent inferenceは明示的research-only。Goal 5はPaper drift記録を持つが、model weightの承認済み永続registry、live推論時間、十分なlive OOS evidenceが揃うまでChampion採用しない
 - Morning datasetのlabel endpointはcallerが供給するJPX session calendarとaware `label_end_at`に依存する。live provider未決のため、fixtureのpandas営業日・15:30 endpointは市場calendar/scheduleの代替でも収益性の証拠でもない
-- Goal 5 API/PWAはlocalhost専用。認証・TLS・remote hostingは未実装で、internetへ公開してはならない
+- Goal 5の実データAPI/PWAは引き続きlocalhost専用で、internetへ公開してはならない。本人限定ホスト版companionは実装済みだが、local実データや提案の同期経路は未実装で、Sites project作成結果の外部確認待ち
 - PWA内通知だけ利用可能。web push providerは未設定で`BLOCKED_BY_CONFIGURATION`
 - daily automation frameworkとTask Scheduler scriptは実装済みだが、live data/Morning/model handlerは外部capability待ちで、未設定のstageは安全に停止する
 - Paper集計はlive forward observationが0件のため空状態。fixture proposalから収益性、drift、Champion採否を推論しない

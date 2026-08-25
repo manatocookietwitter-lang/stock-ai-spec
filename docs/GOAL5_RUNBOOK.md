@@ -189,3 +189,27 @@ PWA Settings API returns only a configured/not-configured boolean. Never paste t
 into CSV, SQLite metadata, Markdown, screenshots, logs, exceptions, fixtures, or Git.
 Automation persists stable reason codes rather than provider exception text. The HTTP layer
 accepts only localhost Host/Origin values; do not expose the service through a remote proxy.
+
+## 9. Owner-only hosted companion
+
+`hosted/` is a separate authenticated companion for checking readiness and the system's safety
+stop reasons from a remote URL. It is not a remote copy of the operational ledger. Its Sites
+access policy must remain owner-only unless the user explicitly approves a different audience.
+
+The hosted worker may persist only minimal user-scoped operating metadata such as acknowledgement
+of the safety boundary. Do not upload `JQUANTS_API_KEY`, `data/live`, Production Dataset or model
+artifacts, broker CSVs, portfolio records, NISA/tax state, proposals, decisions, or executions.
+Until an authenticated and approved sync contract exists, the hosted UI must remain `NO PROPOSAL`
+and show the missing capabilities. It must not substitute fixtures, yesterday's proposal, or
+synthetic market/account values. Do not expose the local FastAPI service through a reverse proxy
+or invent a tunnel to make the hosted worker reach localhost.
+
+Local verification for the companion:
+
+```text
+cd hosted
+npm run lint
+npm run build
+npm audit --omit=dev
+npm audit
+```
