@@ -278,7 +278,10 @@ def test_stale_day_blocks_every_proposal_surface_and_secret_is_never_returned(
     assert today["proposal"] is None
     assert today["isStale"] is True
     assert client.get(f"/api/v1/proposals/{proposal.proposal_id}").status_code == 409
-    assert client.get("/api/v1/stocks/B").status_code == 404
+    assert (
+        client.get(f"/api/v1/stocks/B?businessDate={AS_OF.date().isoformat()}").status_code
+        == 404
+    )
     assert (
         client.post(
             f"/api/v1/proposals/{proposal.proposal_id}/review",
@@ -322,8 +325,9 @@ def test_read_only_api_states_security_headers_and_pwa_fallback(tmp_path: Path) 
     assert client.get(f"/api/v1/proposals/{proposal.proposal_id}/decision").json() is None
     assert client.get("/api/v1/decisions/missing/executions").json() == []
     assert client.get("/api/v1/ranking").json() == []
-    assert client.get("/api/v1/stocks/B").status_code == 200
-    assert client.get("/api/v1/stocks/UNKNOWN").status_code == 404
+    business_date = AS_OF.date().isoformat()
+    assert client.get(f"/api/v1/stocks/B?businessDate={business_date}").status_code == 200
+    assert client.get(f"/api/v1/stocks/UNKNOWN?businessDate={business_date}").status_code == 404
     assert client.get("/api/v1/validation?mode=live").json()["blockingReason"]
     assert client.get("/api/v1/validation?mode=historical").json()["blockingReason"]
     assert client.get("/api/v1/notifications").json() == []

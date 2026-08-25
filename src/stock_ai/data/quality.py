@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from datetime import date
 from typing import cast
 
@@ -29,6 +30,7 @@ def validate_rows(
     rows: tuple[dict[str, object], ...],
     *,
     requested_source_date: date,
+    required_columns: Collection[str] | None = None,
 ) -> QualityReport:
     """Validate schema, keys, dates, and numeric market-data invariants."""
 
@@ -48,7 +50,8 @@ def validate_rows(
         )
 
     frame = pd.DataFrame.from_records(rows)
-    missing = tuple(column for column in schema.required_columns if column not in frame)
+    active_required = schema.required_columns if required_columns is None else required_columns
+    missing = tuple(column for column in active_required if column not in frame)
     if missing:
         issues.append(
             QualityIssue(
@@ -125,7 +128,12 @@ def validate_rows(
             )
 
     if dataset is DatasetName.DAILY_PRICES:
-        issues.extend(_validate_daily_prices(frame))
+        issues.extend(
+            _validate_daily_prices(
+                frame,
+                adjusted_required=required_columns is None,
+            )
+        )
     elif dataset is DatasetName.TOPIX:
         issues.extend(_validate_ohlc(frame, prefix=""))
     elif dataset is DatasetName.FINANCIAL_SUMMARY:
@@ -152,12 +160,19 @@ def _numeric(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.DataFrame:
     )
 
 
-def _validate_daily_prices(frame: pd.DataFrame) -> list[QualityIssue]:
+def _validate_daily_prices(
+    frame: pd.DataFrame,
+    *,
+    adjusted_required: bool,
+) -> list[QualityIssue]:
     issues: list[QualityIssue] = []
-    for prefix in ("", "Adj"):
+    prefixes = ("", "Adj") if adjusted_required else ("",)
+    for prefix in prefixes:
         issues.extend(_validate_ohlc(frame, prefix=prefix))
 
-    volume_columns = ("Vo", "AdjVo", "Va")
+    volume_columns = tuple(
+        column for column in ("Vo", "AdjVo", "Va") if column in frame
+    )
     volume_values = _numeric(frame, volume_columns)
     volume_provided = frame.loc[:, list(volume_columns)].notna() & (
         frame.loc[:, list(volume_columns)] != ""

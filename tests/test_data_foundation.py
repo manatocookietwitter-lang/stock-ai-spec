@@ -497,7 +497,7 @@ def _daily_row(close: float, *, adjusted_close: float | None = None) -> dict[str
 def _financial_row() -> dict[str, object]:
     return {
         "DiscDate": "2026-08-21",
-        "DiscTime": "15:00:00",
+        "DiscTime": "15:00",
         "Code": "72030",
         "DiscNo": "202608210001",
         "DocType": "FYFinancialStatements_Consolidated_JP",

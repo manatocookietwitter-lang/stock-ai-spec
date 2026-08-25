@@ -16,6 +16,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from stock_ai.data.contracts import (
+    BULK_REQUIRED_COLUMNS,
     ENDPOINT_SCHEMAS,
     BulkFileDescriptor,
     DatasetName,
@@ -240,6 +241,12 @@ class JQuantsV2Client:
                     key=key,
                     size=size,
                     last_modified=last_modified.astimezone(UTC),
+                    checkpoint_scope_start=(
+                        start if dataset is DatasetName.TRADING_CALENDAR else None
+                    ),
+                    checkpoint_scope_end=(
+                        end if dataset is DatasetName.TRADING_CALENDAR else None
+                    ),
                 )
             )
         fingerprints = [descriptor.fingerprint for descriptor in descriptors]
@@ -269,7 +276,7 @@ class JQuantsV2Client:
             reader = csv.DictReader(io.StringIO(text, newline=""))
             if reader.fieldnames is None or len(reader.fieldnames) != len(set(reader.fieldnames)):
                 raise ValueError
-            required = set(ENDPOINT_SCHEMAS[descriptor.dataset].required_columns)
+            required = set(BULK_REQUIRED_COLUMNS[descriptor.dataset])
             if not required <= set(reader.fieldnames):
                 raise ValueError
             parsed_rows: list[dict[str, str]] = []

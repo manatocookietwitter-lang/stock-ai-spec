@@ -69,6 +69,10 @@ Bulk Listが空、CSVがheaderだけ、rowが範囲外、品質検証に失敗�
 file fingerprint単位のcheckpointが`SUCCEEDED`で、紐付く全objectとfileが存在する場合だけ`--resume`でskipする。
 `RUNNING / FAILED` runや、file全体のcheckpointが未完了なobjectはPIT読取へ公開しない。
 
+公式file downloadの日足CSVはRESTと異なり、調整OHLCVを含まず`AdjFactor`だけを含む。rawでは存在しない列を
+生成せず、normalizedでは能力不足として欠損を保持する。Production buildはD064の公式累積係数式を全固定期間へ適用し、
+methodと入力系列hashを固定する。Calendar Bulkは全期間fileを返すため、D065どおり要求期間をcheckpoint scopeへ含める。
+
 ## 保存構造
 
 ```text
@@ -177,3 +181,13 @@ V0/V1/V2/Datasetの最終Build Manifestを入口にし、認証済みV2 snapshot
 - breadthは全銘柄coverageを別途確認するまで`PARTIAL`
 - full JPX規模ではpandas/scikit-learnのmemory gateを実データで確認するまでscale capabilityは`PARTIAL`
 - 前場・分足、需給、TDnet、broker連携はGoal 2対象外
+
+## 2026-08-25 live受け入れ中間checkpoint
+
+- live root: `data/live`（Git対象外）
+- 実取得済み: 2017-01-04〜2020-12-30の日足系、Calendarは2017-01-01〜2020-12-31 scope
+- Bulk checkpoint: `SUCCEEDED=198 / FAILED=1`。FAILEDは初回の旧Bulk日足schema期待で、削除せず監査保持
+- immutable object: 10,808、`data verify`はstatus OK、quality issue 0
+- 同一2017年scopeのresume再実行はdownload 0 / 全file skipを確認
+- 次回再開点: 2021-01-01。2021〜契約上の最新確定営業日を年次stageで取得後、Production buildへ進む
+- Production Dataset、Goal 3実データrun、Champion選定、locked holdout評価はこの中間checkpointでは未実行

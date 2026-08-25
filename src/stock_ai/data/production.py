@@ -91,7 +91,12 @@ def build_production_data(
         )
     )
 
-    business_dates = _business_dates(calendar)
+    business_dates = _bounded_business_dates(
+        calendar,
+        master=master,
+        prices=prices,
+        topix=topix,
+    )
     availability = _next_proposal_cutoffs(business_dates)
     universe = build_point_in_time_universe(master, business_dates=business_dates)
     daily = _canonical_daily(
@@ -268,6 +273,47 @@ def _business_dates(calendar: pd.DataFrame) -> pd.DatetimeIndex:
     return dates
 
 
+def _bounded_business_dates(
+    calendar: pd.DataFrame,
+    *,
+    master: pd.DataFrame,
+    prices: pd.DataFrame,
+    topix: pd.DataFrame,
+) -> pd.DatetimeIndex:
+    """Use the contiguous common provider coverage, rejecting internal date gaps."""
+
+    calendar_dates = _business_dates(calendar)
+    source_columns = (
+        ("security master", master, "effective_date"),
+        ("daily prices", prices, "trading_date"),
+        ("TOPIX", topix, "trading_date"),
+    )
+    coverage: list[tuple[str, set[pd.Timestamp]]] = []
+    for name, frame, column in source_columns:
+        _require_columns(frame, {column}, name)
+        dates = {
+            pd.Timestamp(value).normalize()
+            for value in pd.to_datetime(frame[column], errors="coerce").dropna().unique()
+        }
+        if not dates:
+            raise ValueError(f"BLOCKED_BY_DATA_CAPABILITY: {name} has no dated rows")
+        coverage.append((name, dates))
+    start = max(min(dates) for _, dates in coverage)
+    end = min(max(dates) for _, dates in coverage)
+    bounded = calendar_dates[(calendar_dates >= start) & (calendar_dates <= end)]
+    if len(bounded) < 2:
+        raise ValueError("BLOCKED_BY_DATA_CAPABILITY: common production coverage is too short")
+    expected = set(bounded)
+    for name, dates in coverage:
+        missing = expected - dates
+        if missing:
+            first = min(missing).date()
+            raise ValueError(
+                f"BLOCKED_BY_DATA_CAPABILITY: {name} has an internal date gap at {first}"
+            )
+    return bounded
+
+
 def _next_proposal_cutoffs(business_dates: pd.DatetimeIndex) -> dict[pd.Timestamp, pd.Timestamp]:
     result: dict[pd.Timestamp, pd.Timestamp] = {}
     for current, following in pairwise(business_dates):
@@ -303,6 +349,7 @@ def _canonical_daily(
     frame["trading_date"] = pd.to_datetime(frame["trading_date"]).dt.normalize()
     if frame.duplicated(["trading_date", "symbol"]).any():
         raise ValueError("daily prices contain duplicate trading_date/symbol rows")
+    frame = _reconstruct_bulk_adjusted_prices(frame)
     frame["revision_available_at"] = pd.to_datetime(frame["available_at"], utc=True)
     frame["available_at"] = frame["trading_date"].map(availability)
     session_position = {day: index for index, day in enumerate(sorted(availability))}
@@ -364,6 +411,101 @@ def _canonical_daily(
     if invalid.any():
         raise ValueError("daily production prices contain invalid finite/positive values")
     return frame.sort_values(["trading_date", "symbol"]).reset_index(drop=True)
+
+
+def _reconstruct_bulk_adjusted_prices(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply the official file-download AdjFactor formula when adjusted fields are absent."""
+
+    output = frame.copy()
+    adjusted = (
+        "research_open",
+        "research_high",
+        "research_low",
+        "research_close",
+        "research_volume",
+    )
+    for column in (
+        "raw_open",
+        "raw_high",
+        "raw_low",
+        "raw_close",
+        "raw_volume",
+        "adjustment_factor",
+        *adjusted,
+    ):
+        if column not in output:
+            output[column] = np.nan
+        output[column] = pd.to_numeric(output[column], errors="coerce")
+    provided_count = output[list(adjusted)].notna().sum(axis=1)
+    mixed = (provided_count > 0) & (provided_count < len(adjusted))
+    if mixed.any():
+        raise ValueError("daily prices contain a partial adjusted-OHLCV provider row")
+    missing = provided_count.eq(0)
+    if not missing.any():
+        return output
+    invalid_factor = (
+        output["adjustment_factor"].isna()
+        | ~np.isfinite(output["adjustment_factor"])
+        | (output["adjustment_factor"] <= 0)
+    )
+    if invalid_factor.any():
+        raise ValueError("daily prices cannot reconstruct adjustment from invalid AdjFactor")
+
+    ordered = output.sort_values(
+        ["symbol", "trading_date"],
+        ascending=(True, False),
+    ).copy()
+    price_factor = ordered.groupby("symbol", sort=False)["adjustment_factor"].transform(
+        lambda values: values.shift(1, fill_value=1.0).cumprod()
+    )
+    ex_rights = (
+        ordered["ex_rights_type"].astype("string")
+        if "ex_rights_type" in ordered
+        else pd.Series(pd.NA, index=ordered.index, dtype="string")
+    )
+    volume_event_factor = ordered["adjustment_factor"].where(ex_rights != "3", 1.0)
+    volume_factor = volume_event_factor.groupby(ordered["symbol"], sort=False).transform(
+        lambda values: values.shift(1, fill_value=1.0).cumprod()
+    )
+    ordered["__price_cum_adj"] = price_factor
+    ordered["__volume_cum_adj"] = volume_factor
+    factors = ordered[["__price_cum_adj", "__volume_cum_adj"]].reindex(output.index)
+    for raw_column, research_column in (
+        ("raw_open", "research_open"),
+        ("raw_high", "research_high"),
+        ("raw_low", "research_low"),
+        ("raw_close", "research_close"),
+    ):
+        output.loc[missing, research_column] = (
+            output.loc[missing, raw_column] * factors.loc[missing, "__price_cum_adj"]
+        )
+    output.loc[missing, "research_volume"] = (
+        output.loc[missing, "raw_volume"] / factors.loc[missing, "__volume_cum_adj"]
+    )
+    lineage_columns = [
+        "symbol",
+        "trading_date",
+        "raw_open",
+        "raw_high",
+        "raw_low",
+        "raw_close",
+        "raw_volume",
+        "adjustment_factor",
+    ]
+    lineage = output.sort_values(["symbol", "trading_date"])[lineage_columns].copy()
+    lineage["ex_rights_type"] = (
+        output.loc[lineage.index, "ex_rights_type"].astype("string")
+        if "ex_rights_type" in output
+        else pd.Series(pd.NA, index=lineage.index, dtype="string")
+    )
+    lineage_hash = hashlib.sha256(
+        pd.util.hash_pandas_object(lineage, index=False).to_numpy().tobytes()
+    ).hexdigest()
+    output.loc[missing, "adjustment_version"] = (
+        f"jquants-file-cumulative-adjfactor-v1:{lineage_hash}"
+    )
+    output.loc[missing, "adjustment_source"] = "official_file_adjfactor_formula_v1"
+    return output
 
 
 def _daily_financial_features(

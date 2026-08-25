@@ -21,6 +21,7 @@ data/raw/
 data/normalized/
 data/features/
 data/datasets/
+data/live/
 artifacts/models/
 artifacts/reports/
 .demo-artifacts/

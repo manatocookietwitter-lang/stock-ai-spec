@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -209,6 +209,9 @@ def _daily_prices(frame: pd.DataFrame, payload_hash: str) -> pd.DataFrame:
                 "research_low",
                 "research_close",
                 "research_volume",
+                "market_cap_million_yen",
+                "ex_rights_type",
+                "adjustment_source",
                 "morning_close",
                 "research_morning_close",
                 "afternoon_open",
@@ -238,6 +241,17 @@ def _daily_prices(frame: pd.DataFrame, payload_hash: str) -> pd.DataFrame:
             "research_low": numeric("AdjL"),
             "research_close": numeric("AdjC"),
             "research_volume": numeric("AdjVo"),
+            "market_cap_million_yen": numeric("MktCap"),
+            "ex_rights_type": (
+                frame["ExRT"].astype("string")
+                if "ExRT" in frame
+                else pd.Series([pd.NA] * len(frame), dtype="string")
+            ),
+            "adjustment_source": (
+                "provider_adjusted_fields"
+                if all(column in frame for column in ("AdjO", "AdjH", "AdjL", "AdjC", "AdjVo"))
+                else "bulk_adjfactor_only"
+            ),
             "morning_close": numeric("MC"),
             "research_morning_close": numeric("MAdjC"),
             "afternoon_open": numeric("AO"),
@@ -310,7 +324,7 @@ def _financial_summary(frame: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
     disclosed_date = pd.to_datetime(frame["DiscDate"]).dt.date
     announced_at = [
-        datetime.combine(day, datetime.strptime(str(value), "%H:%M:%S").time(), _JST)
+        datetime.combine(day, time.fromisoformat(str(value)), _JST)
         for day, value in zip(disclosed_date, frame["DiscTime"], strict=True)
     ]
     codes = frame["Code"].astype(str)

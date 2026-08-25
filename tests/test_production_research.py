@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 import stock_ai.cli as stock_cli
+import stock_ai.data.production as production_module
 import stock_ai.ml.advanced as advanced_module
 from stock_ai.cli import app
 from stock_ai.data import DatasetName, HistoricalRevisionPolicy, SubscriptionPlan
@@ -51,6 +52,43 @@ from stock_ai.ml.production import (
 from stock_ai.research import run_research_decision_e2e
 
 JST = ZoneInfo("Asia/Tokyo")
+
+
+def test_bulk_adjusted_prices_follow_official_cumulative_factor_formula() -> None:
+    dates = pd.to_datetime(["2024-01-10", "2024-01-11", "2024-01-12", "2024-01-13"])
+    frame = pd.DataFrame(
+        {
+            "symbol": "A",
+            "trading_date": dates,
+            "raw_open": [990.0, 475.0, 395.0, 405.0],
+            "raw_high": [1010.0, 485.0, 405.0, 415.0],
+            "raw_low": [980.0, 470.0, 390.0, 400.0],
+            "raw_close": [1000.0, 480.0, 400.0, 410.0],
+            "raw_volume": [100.0, 200.0, 300.0, 400.0],
+            "adjustment_factor": [1.0, 0.5, 0.8, 1.0],
+            "ex_rights_type": [pd.NA, "1", "3", pd.NA],
+            "research_open": np.nan,
+            "research_high": np.nan,
+            "research_low": np.nan,
+            "research_close": np.nan,
+            "research_volume": np.nan,
+            "adjustment_version": "bulk-payload",
+            "adjustment_source": "bulk_adjfactor_only",
+        }
+    )
+
+    adjusted = production_module._reconstruct_bulk_adjusted_prices(frame)
+
+    assert adjusted["research_close"].tolist() == pytest.approx([400.0, 384.0, 400.0, 410.0])
+    assert adjusted["research_volume"].tolist() == pytest.approx([200.0, 200.0, 300.0, 400.0])
+    assert set(adjusted["adjustment_source"]) == {"official_file_adjfactor_formula_v1"}
+    assert adjusted["adjustment_version"].str.startswith(
+        "jquants-file-cumulative-adjfactor-v1:"
+    ).all()
+    changed_input = frame.copy()
+    changed_input.loc[0, "raw_high"] += 1
+    changed = production_module._reconstruct_bulk_adjusted_prices(changed_input)
+    assert changed.loc[0, "adjustment_version"] != adjusted.loc[0, "adjustment_version"]
 
 
 class FrameCatalog:

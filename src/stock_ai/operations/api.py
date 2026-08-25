@@ -595,9 +595,13 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
         ]
 
     @app.get("/api/v1/stocks/{symbol}")
-    def stock_detail(symbol: str) -> dict[str, object]:
+    def stock_detail(
+        symbol: str,
+        business_date: Annotated[date | None, Query(alias="businessDate")] = None,
+    ) -> dict[str, object]:
         portfolio = store.latest_portfolio()
-        today_proposal = _active_proposal(store, datetime.now(JST).date())
+        proposal_date = business_date or datetime.now(JST).date()
+        today_proposal = _active_proposal(store, proposal_date)
         positions = (
             []
             if portfolio is None

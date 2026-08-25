@@ -176,6 +176,26 @@ ENDPOINT_SCHEMAS: Mapping[DatasetName, EndpointSchema] = MappingProxyType({
     ),
 })
 
+# J-Quants' official file-download contract intentionally omits provider-computed
+# adjusted OHLCV columns from daily-price CSVs.  The provider documents that file
+# consumers must reconstruct them from AdjFactor across the complete series.
+BULK_REQUIRED_COLUMNS: Mapping[DatasetName, tuple[str, ...]] = MappingProxyType(
+    {
+        **{dataset: schema.required_columns for dataset, schema in ENDPOINT_SCHEMAS.items()},
+        DatasetName.DAILY_PRICES: (
+            "Date",
+            "Code",
+            "O",
+            "H",
+            "L",
+            "C",
+            "Vo",
+            "Va",
+            "AdjFactor",
+        ),
+    }
+)
+
 
 class FetchedPayload(DataContractModel):
     dataset: DatasetName
@@ -208,6 +228,8 @@ class BulkFileDescriptor(DataContractModel):
     key: str = Field(min_length=1, repr=False)
     size: int = Field(ge=0)
     last_modified: datetime
+    checkpoint_scope_start: date | None = None
+    checkpoint_scope_end: date | None = None
 
     @field_validator("last_modified")
     @classmethod
@@ -215,6 +237,18 @@ class BulkFileDescriptor(DataContractModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("bulk last_modified must be timezone-aware")
         return value
+
+    @model_validator(mode="after")
+    def checkpoint_scope_is_complete(self) -> BulkFileDescriptor:
+        if (self.checkpoint_scope_start is None) != (self.checkpoint_scope_end is None):
+            raise ValueError("bulk checkpoint scope requires both start and end")
+        if (
+            self.checkpoint_scope_start is not None
+            and self.checkpoint_scope_end is not None
+            and self.checkpoint_scope_end < self.checkpoint_scope_start
+        ):
+            raise ValueError("bulk checkpoint scope end cannot precede start")
+        return self
 
     @property
     def key_hash(self) -> str:
@@ -229,6 +263,16 @@ class BulkFileDescriptor(DataContractModel):
                 self.key_hash,
                 str(self.size),
                 self.last_modified.isoformat(),
+                (
+                    "-"
+                    if self.checkpoint_scope_start is None
+                    else self.checkpoint_scope_start.isoformat()
+                ),
+                (
+                    "-"
+                    if self.checkpoint_scope_end is None
+                    else self.checkpoint_scope_end.isoformat()
+                ),
             )
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()

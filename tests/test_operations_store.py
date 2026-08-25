@@ -743,7 +743,7 @@ def test_automation_blocks_and_never_reuses_a_prior_proposal(tmp_path: Path) -> 
 
     jobs = automation.run(
         business_date=next_day.date(),
-        now=next_day,
+        now=datetime.now(AS_OF.tzinfo),
         handlers={AutomationStage.MORNING_CAPTURE: blocked},
         stages=(AutomationStage.MORNING_CAPTURE, AutomationStage.PROPOSAL),
         require_upstream=False,

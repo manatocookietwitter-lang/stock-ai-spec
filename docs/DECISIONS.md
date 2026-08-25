@@ -559,3 +559,25 @@ jobを`BLOCKED_BY_DATA_CAPABILITY`で停止し、fixture・前日提案・推測
 jobはhandler前にdurable `RUNNING`を記録し、成功確定時にも同じprocessが未失効lockを所有することを再照合する。
 freshness/proposal lineageをblock・failure・成功stage reuseで保持し、stable logical-stage idempotency key、heartbeat、同一workflowの
 upstream成功を必須とする。APIはDailyStatusが指す提案だけを表示・操作可能にし、Host / Originをlocalhostへ限定する。
+
+### D064 — V2 Bulk日足は公式file-download調整式で研究系列を再構成する
+
+2026-08-25の実取得で、`/equities/bars/daily` RESTは`AdjO / AdjH / AdjL / AdjC / AdjVo`を返す一方、
+公式Bulk CSVは仕様どおり`O / H / L / C / Vo / AdjFactor`だけを返すことを確認した。Bulk rawは受信列をそのまま保存し、
+存在しない調整値を日次slice内で推測しない。Production build時に固定済みsource vintageの全期間を銘柄別・日付降順に並べ、
+公式file-download仕様に従って「現在行より新しい日付の`AdjFactor`の累積積」を価格へ乗算し、出来高を除算する。
+`ExRT = 3`のrights issueは公式注意事項どおり出来高側の累積係数から除外する。
+
+再構成methodと全入力系列hashを`adjustment_source / adjustment_version`へ固定する。RESTの調整OHLCVが5列すべて存在する行は
+provider値を使い、5列の一部だけが存在するrowはfail closedする。この処理は`SINGLE_VINTAGE_AS_REVISED`の制約を解消せず、
+完全なhistorical revision PITや採用可能性を意味しない。
+
+### D065 — 全期間Calendar Bulkは要求scope別にcheckpointする
+
+実取得した`/markets/calendar` Bulk fileは、Bulk Listの要求期間にかかわらず2008-01-01〜2027-12-31の全期間rowを返した。
+Calendarだけは要求`start / end`をfile fingerprintのcheckpoint scopeへ含め、要求範囲内rowだけを日付sliceへ公開する。
+同一scopeの再実行は全object完全性を確認してskipし、別scopeを誤って完了扱いしない。Calendar以外のdatasetが要求範囲外rowを
+返した場合は従来どおりfail closedする。
+
+Production buildはCalendar全体をmaster / daily prices / TOPIXの共通する連続coverageへ境界化し、境界内部でどれか1系統の
+営業日が欠ければ日付を黙って落とさず`BLOCKED_BY_DATA_CAPABILITY`にする。

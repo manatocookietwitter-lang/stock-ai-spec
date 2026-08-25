@@ -1,7 +1,7 @@
 # Project Status
 
-更新日: 2026-08-24
-状態: `GOAL_5_IMPLEMENTATION_COMPLETE_LIVE_ACCEPTANCE_BLOCKED_BY_CAPABILITY`
+更新日: 2026-08-25
+状態: `LIVE_ACCEPTANCE_PARTIAL_CHECKPOINT_2020_COMPLETE`
 
 ## Goal 1で実装したもの
 
@@ -195,7 +195,7 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 - `stock-ai research advanced`は認証済みV0/V1/V2/Dataset Build Manifestだけを入口とし、成功・設定不正・全trial失敗・途中fold失敗・artifact公開失敗をappend-only ExperimentRegistryへ保存。完了済trial/foldとreport/Build/V2 identityを失わない
 - model family / horizon / seed / estimator / Optuna / OOF行数 / model-fit数を明示的にboundし、超過時は`BLOCKED_BY_RESOURCE_CAPABILITY`
 - locked final holdoutはreport APIからrowを返さず、Goal 3 development reportは常にresearch-only / adoption不可
-- API keyが見えない現processではlive Production Datasetを作らず、deterministic fixtureでlibrary数値・漏洩境界・artifact改ざんを検証
+- deterministic fixtureでlibrary数値・漏洩境界・artifact改ざんを検証済み。live catalogは2017〜2020を受入済みだが、全取得期間の確定前なのでProduction Datasetは未生成
 
 ## Goal 4で実装したもの（live前場provider・model採用はblocked）
 
@@ -293,6 +293,25 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 
 ## 検証結果
 
+### 2026-08-25 実データ受け入れ中間checkpoint
+
+- 現processで`JQUANTS_API_KEY`設定済みをboolean確認。credential値は表示・保存していない
+- 2026-08-24の実API preflightで、銘柄master 4,444行、日足4,444行、Calendar 1行、TOPIX 1行、財務summary 7行を取得
+- 5 datasetのBulk List / Getを実確認。2015・2016年の日足BulkはHTTP 400、2017年以降は取得可能で、実file最古日は2017-01-04
+- 観測capabilityはStandard相当の10年履歴と整合するが、APIにplan自己申告endpointがないため契約名そのものは自動断定しない
+- REST日足は調整OHLCVを返し、Bulk日足は公式仕様どおりraw OHLCV + `AdjFactor`のみ。D064の公式累積係数式へadapterを更新し回帰testを追加
+- 午後session / `AAdjO`は実REST応答・Bulkとも利用不可。exact 12:30 entry labelは`BLOCKED_BY_DATA_CAPABILITY`
+- Git対象外の`data/live`へ2017-01-04〜2020-12-30を年次stage取得。Calendar scopeは2017-01-01〜2020-12-31
+- Bulk checkpointは`SUCCEEDED=198 / FAILED=1`。FAILED 1件は旧schema期待による初回日足fileで、後続resume成功後も監査記録として保持
+- 同一scope再実行で2017年1月は5/5 file、2017年2〜12月は45/45 fileがdownload 0でskipされ、resume完全性を確認
+- `data verify --data-root data/live`: 10,808 immutable object、feature 0、dataset 0、build 0、status OK
+- catalog品質issue 0件。normalized object集計は日足976 object / 3,862,418行、master 995 / 3,935,157行、財務996 / 76,076行、TOPIX 976 / 976行、Calendar 1,461 / 1,461行。rawも同数
+- Production Dataset、Goal 3実データwalk-forward、特徴量・parameter・ensemble選定、Champion固定、locked holdout評価は未実行。holdoutには触れていない
+- ユーザー指示により2020年stage完了を切りの良い停止点とした。次回再開点は2021-01-01
+- 中間checkpoint最終gate: Ruff合格、mypy strict 43 source合格、Python 192 test合格、branch coverage 85.31%、PWA lint / typecheck / 6 unit test / production build / 1 E2E合格
+- 固定日fixtureが実日付を越えて露呈した2件のoperations testを修正。stock詳細APIは任意の`businessDate`を受けて再現可能に参照でき、automation lock testは実時計を使用する
+- gate後の`data verify`再実行も10,808 object / status OK。`data/live`はGit対象外で、API key値はsource・log・fixture・Markdownへ保存していない
+
 2026-08-24に非editable installを更新後、Goal 2 final gateとして下記を実行した。`uv` executableはPATHにないため、
 同じinstalled `uv 0.12.5`をsystem Pythonのmodule entry pointから実行した。
 
@@ -381,7 +400,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 - Goal 1 labelは12:30 entryやTOPIX/sector excess returnではなく、調整後終値間absolute returnの研究proxy
 - Goal 1 baseline uncertaintyはtraining residual RMSE。Goal 3はOOF calibrated rank-space intervalを持つが、live/full-scale empirical coverageは未評価
-- Goal 2実装とfixture/MockTransport検証は完了したが、現在のlocal catalogはfull historical datasetではないためProduction Dataset / baselineの実データartifactは未生成
+- Goal 2実装とfixture/MockTransport検証は完了し、live catalogは2017〜2020を受入済みだが、2021年以降が未取得のためProduction Dataset / baselineの実データartifactは未生成
 - NISA枠の詳細な機会費用、複数broker/複数税policyのrouter、申告税額は未実装。Tax Engineは意思決定用推定のみ
 - exact discrete optimizerは小さい明示candidate universe用。上限超過は近似解へ切り替えずfail closed
 - JSONL experiment registryは単一process実装でinter-process lock未実装。Goal 2/3 Production snapshotとadvanced reportはdirectory atomic publish + Build Manifestへ移行済み
@@ -392,7 +411,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - `/fins/summary`の`ShOutFY`は期末開示値であり、日次shares outstanding seriesではない
 - J-Quants planは自動判定せず、CLIで宣言したplanより上のendpointをfail closedする
 - Corporate Actionのannouncement時刻と詳細種別はdaily price endpointに存在せず、effective-date adjustment lineageのみ。推測しない
-- full JPX履歴のmemory/time実測はAPI key継承後まで未実施。Goal 3は推定OOF行数/model-fit数をfail closedでboundし、horizon/model-family batchを既定にしたが、scale capabilityは実測完了まで`PARTIAL`
+- 2017〜2020のJPX履歴取得は実測済み。2021年以降の取得とfull Production Datasetでのmemory/time実測は未実施。Goal 3は推定OOF行数/model-fit数をfail closedでboundし、horizon/model-family batchを既定にしたが、scale capabilityは実測完了まで`PARTIAL`
 - Goal 3 advanced reportはdevelopment OOF専用でlocked holdoutを未開封。liveデータ、複数seed、全horizonの実runと最終holdout評価前にChampion採用しない
 - OOF ensembleの不確実性は日付内rank space。絶対return金額幅へのcalibrationはlive OOSが得られるまで未採用
 - Goal 4 refit bundleとcurrent inferenceは明示的research-only。Goal 5はPaper drift記録を持つが、model weightの承認済み永続registry、live推論時間、十分なlive OOS evidenceが揃うまでChampion採用しない
@@ -404,7 +423,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 ## 実データ/APIまでblockedの項目
 
-- 現在のCodex processから`JQUANTS_API_KEY`を認識できず、full Bulk history取得は環境変数を継承した再起動待ち
+- 現在のCodex processは環境変数`JQUANTS_API_KEY`が設定済みであることを認識している。値は表示・保存していない。capabilityと2017〜2020のliveデータ品質は実取得で検証済みで、2021年以降の年次Bulk受け入れが未完了
 - 初回取得以前のprovider correction vintage、完全なlisting/delisting/corporate-action event lineage
 - 11:30時点の前場価格、出来高、market breadth、同時刻履歴
 - 承認済みMorning model registry entry、live OOS比較、11:30締切内の実推論時間
@@ -417,6 +436,6 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 1. Goal 2 checkpoint `269d720`、Goal 3 checkpoint `949502b`、Goal 4 checkpoint `f7c1709`は作成済み。
 2. Goal 5の全gateとread-only reviewは完了し、このSTATUSを含む外部依存外のclean checkpointを正本とする。
-3. Codex processがAPI keyを継承後、Standard Bulkで2017-01-04〜契約上の最新確定営業日をcheckpoint / resume取得する。
-4. `data verify`、Production Dataset、Goal 3 / 4 live OOS、Goal 5 live Paper観測を実行し、live-data acceptanceとmodel採否を追記する。
+3. Standard相当Bulkの2017-01-04〜2020-12-30はcheckpoint / resume取得済み。次回は2021-01-01から契約上の最新確定営業日まで年次stageを継続する。
+4. 全取得期間の`data verify`、Production Dataset、Goal 3 development選定と固定、locked holdout単回評価、Goal 4 live OOS、Goal 5 live Paper観測の順に実行し、live-data acceptanceとmodel採否を追記する。
 5. broker integrationと自動売買は今後も実装しない。

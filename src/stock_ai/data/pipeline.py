@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 from stock_ai.data.contracts import (
+    BULK_REQUIRED_COLUMNS,
     ENDPOINT_SCHEMAS,
     DatasetName,
     FetchedPayload,
@@ -118,8 +119,16 @@ class JQuantsV2Ingestor:
                     dataset,
                     payload.rows,
                     requested_source_date=source_date,
+                    required_columns=(
+                        BULK_REQUIRED_COLUMNS[dataset]
+                        if bulk_fingerprint is not None
+                        else None
+                    ),
                 )
                 source_schema = ENDPOINT_SCHEMAS[dataset]
+                source_schema_version = source_schema.schema_version
+                if bulk_fingerprint is not None:
+                    source_schema_version += "+bulk-file-v1"
                 raw = raw_frame(
                     payload,
                     ingestion_run_id=run_id,
@@ -132,7 +141,7 @@ class JQuantsV2Ingestor:
                     source_date=source_date,
                     frame=raw,
                     payload_hash=payload_hash,
-                    schema_version=source_schema.schema_version,
+                    schema_version=source_schema_version,
                     source_endpoint=payload.endpoint,
                     received_at=payload.received_at,
                     available_at=payload.received_at,
@@ -144,7 +153,7 @@ class JQuantsV2Ingestor:
                 stored_objects.append(raw_object)
 
                 require_quality(quality)
-                normalized_schema_version = f"goal2a-normalized-v1+{source_schema.schema_version}"
+                normalized_schema_version = f"goal2a-normalized-v2+{source_schema_version}"
                 normalized = normalize_payload(
                     payload,
                     ingestion_run_id=run_id,

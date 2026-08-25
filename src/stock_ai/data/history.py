@@ -133,8 +133,10 @@ def _split_payload_by_source_date(
         raise JQuantsSchemaError("J-Quants V2 Bulk CSV contains an invalid source date")
     frame["__source_date"] = parsed.dt.date
     outside = (frame["__source_date"] < start) | (frame["__source_date"] > end)
-    if outside.any():
+    if outside.any() and payload.dataset is not DatasetName.TRADING_CALENDAR:
         raise JQuantsSchemaError("J-Quants V2 Bulk CSV contains rows outside the requested range")
+    if payload.dataset is DatasetName.TRADING_CALENDAR:
+        frame = frame.loc[~outside].copy()
 
     slices: list[tuple[date, FetchedPayload]] = []
     for source_date, group in frame.groupby("__source_date", sort=True):
