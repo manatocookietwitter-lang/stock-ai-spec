@@ -596,3 +596,14 @@ Production buildはCalendar全体をmaster / daily prices / TOPIXの共通する
 Sites deploymentはowner-only accessを既定とする。Internet公開、workspace全体共有、外部viewer追加は
 別の明示承認なしに行わない。localhost FastAPIをreverse proxyでInternetへ公開せず、ホスト版workerから
 local serviceへ到達させるための推測tunnelや代替APIも採用しない。
+
+### D067 — ホスト版の安全状態画面はpublic閲覧を許可する
+
+2026-08-29のユーザー明示指示により、D066のowner-only access既定をホスト版の閲覧に限って変更する。
+安全停止理由、実データ準備状況、no-order境界だけをpublic表示し、本人別の安全境界確認状態を保存する操作は
+ChatGPT sign-inを必須とする。public visitorには提案、Portfolio、口座、NISA・税状態、実約定、model artifact、
+J-Quants取得内容やcredentialを返さない。
+
+この変更はlocalhost実運用PWA/APIの公開を許可しない。localhost service、append-only台帳、`data/live`、
+Production Datasetは従来どおりInternetへ公開・同期しない。Sitesへのpublic deploymentは、この限定画面の
+検証済みversionだけに適用する。

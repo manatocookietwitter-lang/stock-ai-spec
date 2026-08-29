@@ -314,6 +314,7 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 - social preview assetを標準の`public/og.png`へ揃え、Open Graph / X metadataも同一pathへ更新
 - `npm run lint`: pass、`npm run build`: pass、`npm audit --json`: vulnerability 0
 - 再開後もSites `list_sites`は0件で、`.openai/hosting.json`にproject IDは存在しない。新規site作成は一度だけというhosting contractを守り、重複createは行っていない
+- ユーザーの明示指示でホスト版の閲覧accessをpublicへ変更。公開内容は安全停止理由・準備状況・no-order境界だけで、本人別確認状態の保存はChatGPT認証を維持
 
 ### 2026-08-25 実データ受け入れ中間checkpoint
 

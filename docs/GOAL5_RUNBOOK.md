@@ -190,11 +190,12 @@ into CSV, SQLite metadata, Markdown, screenshots, logs, exceptions, fixtures, or
 Automation persists stable reason codes rather than provider exception text. The HTTP layer
 accepts only localhost Host/Origin values; do not expose the service through a remote proxy.
 
-## 9. Owner-only hosted companion
+## 9. Public hosted companion
 
-`hosted/` is a separate authenticated companion for checking readiness and the system's safety
-stop reasons from a remote URL. It is not a remote copy of the operational ledger. Its Sites
-access policy must remain owner-only unless the user explicitly approves a different audience.
+`hosted/` is a separate companion for checking readiness and the system's safety stop reasons
+from a remote URL. It is not a remote copy of the operational ledger. The user approved public
+read access on 2026-08-29. Persisting the user-specific safety acknowledgement still requires
+ChatGPT sign-in and server-side identity validation.
 
 The hosted worker may persist only minimal user-scoped operating metadata such as acknowledgement
 of the safety boundary. Do not upload `JQUANTS_API_KEY`, `data/live`, Production Dataset or model

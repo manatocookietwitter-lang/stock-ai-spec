@@ -80,7 +80,7 @@ export default async function Home() {
       <div className="content" id="home">
         <section className="hero">
           <div>
-            <span className="eyebrow">認証付きホスト版</span>
+              <span className="eyebrow">公開ホスト版</span>
             <h1>今日の判断を、<br />安全に一か所へ。</h1>
             <p>実データの準備状況を確認し、利用可能な根拠だけで12:30の保有案を組み立てます。</p>
           </div>
@@ -136,7 +136,7 @@ export default async function Home() {
             <h2>機密データはローカルに残します</h2>
             <p>JQUANTS_API_KEY、取得済み研究データ、実口座CSVはこのホスト版へ送信しません。</p>
             <ul>
-              <li>本人限定の認証アクセス</li>
+              <li>公開閲覧・保存操作はChatGPT認証</li>
               <li>自動発注・Broker接続なし</li>
               <li>架空の本番データを表示しない</li>
             </ul>
