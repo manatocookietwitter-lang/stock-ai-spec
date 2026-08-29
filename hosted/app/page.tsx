@@ -70,9 +70,9 @@ export default async function Home() {
           <span className="statusDot" aria-hidden="true" />
           <span>{user?.displayName ?? 'ローカルプレビュー'}</span>
           {user ? (
-            <a href={chatGPTSignOutPath('/')} className="accountLink">ログアウト</a>
+            <a href={chatGPTSignOutPath('/')} className="accountLink" target="_top">ログアウト</a>
           ) : (
-            <a href={chatGPTSignInPath('/')} className="accountLink">ログイン</a>
+            <a href={chatGPTSignInPath('/')} className="accountLink" target="_top">ログイン</a>
           )}
         </div>
       </header>
@@ -159,7 +159,7 @@ export default async function Home() {
                   </button>
                 </form>
               ) : (
-                <a className="ackButton" href={chatGPTSignInPath('/')}>ログインして確認</a>
+                <a className="ackButton" href={chatGPTSignInPath('/')} target="_top">ログインして確認</a>
               )}
             </div>
           </aside>

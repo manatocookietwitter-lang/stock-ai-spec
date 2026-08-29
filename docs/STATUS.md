@@ -308,6 +308,13 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 - `npm audit --json`: development dependencyを含めvulnerability 0
 - Sites `create_site`は一度だけ呼び出したが、connectorはproject IDを返さず、その後の`list_sites`も0件。重複作成を避け、remote deploymentは外部control-plane確認待ち
 
+### 2026-08-29 認証付きホスト版再開checkpoint
+
+- Sites plugin 0.1.46の正本手順を再読し、SIWC sign-in / sign-outを`target="_top"`のtop-level navigationへ更新
+- social preview assetを標準の`public/og.png`へ揃え、Open Graph / X metadataも同一pathへ更新
+- `npm run lint`: pass、`npm run build`: pass、`npm audit --json`: vulnerability 0
+- 再開後もSites `list_sites`は0件で、`.openai/hosting.json`にproject IDは存在しない。新規site作成は一度だけというhosting contractを守り、重複createは行っていない
+
 ### 2026-08-25 実データ受け入れ中間checkpoint
 
 - 現processで`JQUANTS_API_KEY`設定済みをboolean確認。credential値は表示・保存していない

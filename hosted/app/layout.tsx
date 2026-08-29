@@ -11,7 +11,7 @@ export const metadata: Metadata = {
     type: 'website',
     images: [
       {
-        url: '/stock-ai-og.png',
+        url: '/og.png',
         width: 1536,
         height: 1024,
         alt: '株AI — 実注文を行わない、日本株の意思決定支援',
@@ -22,7 +22,7 @@ export const metadata: Metadata = {
     card: 'summary_large_image',
     title: '株AI | 日本株意思決定支援',
     description: '実注文を行わない、日本株の意思決定支援アプリ。',
-    images: ['/stock-ai-og.png'],
+    images: ['/og.png'],
   },
 };
 
