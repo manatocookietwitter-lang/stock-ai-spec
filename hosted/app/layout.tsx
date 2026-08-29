@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://stock-ai-decision-support.manato0618.chatgpt.site'),
   title: '株AI | 日本株意思決定支援',
   description: '実注文を行わない、日本株の意思決定支援アプリ。',
   openGraph: {
@@ -11,7 +12,7 @@ export const metadata: Metadata = {
     type: 'website',
     images: [
       {
-        url: '/og.png',
+        url: 'https://stock-ai-decision-support.manato0618.chatgpt.site/og.png',
         width: 1536,
         height: 1024,
         alt: '株AI — 実注文を行わない、日本株の意思決定支援',
@@ -22,7 +23,7 @@ export const metadata: Metadata = {
     card: 'summary_large_image',
     title: '株AI | 日本株意思決定支援',
     description: '実注文を行わない、日本株の意思決定支援アプリ。',
-    images: ['/og.png'],
+    images: ['https://stock-ai-decision-support.manato0618.chatgpt.site/og.png'],
   },
 };
 

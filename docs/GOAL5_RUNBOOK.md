@@ -205,6 +205,17 @@ and show the missing capabilities. It must not substitute fixtures, yesterday's 
 synthetic market/account values. Do not expose the local FastAPI service through a reverse proxy
 or invent a tunnel to make the hosted worker reach localhost.
 
+Production URL:
+
+```text
+https://stock-ai-decision-support.manato0618.chatgpt.site
+```
+
+Before treating a release as current, verify the Sites access policy is `public`, the live URL
+returns HTTP 200, the page remains `NO PROPOSAL` while required live capabilities are absent,
+the Open Graph and X image URLs use the exact production origin, and the D1 `operator_settings`
+table exists. Never expose or print provider credentials while performing these checks.
+
 Local verification for the companion:
 
 ```text

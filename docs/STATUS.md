@@ -306,15 +306,18 @@ fixtureはproduction fallbackでも収益性の証拠でもなく、実注文は
 - `npm run build`: pass
 - `npm audit --omit=dev --json`: vulnerability 0
 - `npm audit --json`: development dependencyを含めvulnerability 0
-- Sites `create_site`は一度だけ呼び出したが、connectorはproject IDを返さず、その後の`list_sites`も0件。重複作成を避け、remote deploymentは外部control-plane確認待ち
+- Sites `create_site`は一度だけ呼び出され、実際にはdirect `structuredContent`でproject IDを返していた。当時のagentが誤って`.result`配下を参照したためIDを永続化できず、deploymentを保留した
 
 ### 2026-08-29 認証付きホスト版再開checkpoint
 
 - Sites plugin 0.1.46の正本手順を再読し、SIWC sign-in / sign-outを`target="_top"`のtop-level navigationへ更新
 - social preview assetを標準の`public/og.png`へ揃え、Open Graph / X metadataも同一pathへ更新
 - `npm run lint`: pass、`npm run build`: pass、`npm audit --json`: vulnerability 0
-- 再開後もSites `list_sites`は0件で、`.openai/hosting.json`にproject IDは存在しない。新規site作成は一度だけというhosting contractを守り、重複createは行っていない
+- 再開時もagent側がdirect `structuredContent.items`を誤って`.result.items`として読んだため0件と判定していた。sessionの非secret監査情報から既存project IDを復元し、重複createせず`.openai/hosting.json`へ永続化した
 - ユーザーの明示指示でホスト版の閲覧accessをpublicへ変更。公開内容は安全停止理由・準備状況・no-order境界だけで、本人別確認状態の保存はChatGPT認証を維持
+- Sites access policyを`public`へ更新し、version 2を`https://stock-ai-decision-support.manato0618.chatgpt.site`へproduction deploy
+- 公開URLはHTTP 200、`株AI` / `NO PROPOSAL`表示、secret値pattern不検出を確認。Open Graph / X imageは同一production originのabsolute URLへ修正済み
+- live D1 binding `DB`と`operator_settings` tableを確認。public visitorはreadinessを閲覧でき、user別確認状態の保存だけがserver-side ChatGPT identityを要求する
 
 ### 2026-08-25 実データ受け入れ中間checkpoint
 
