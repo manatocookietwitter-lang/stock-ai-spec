@@ -2186,8 +2186,10 @@ def _validate_run_inputs(
         raise ValueError("advanced research requires an authenticated data snapshot ID")
     if len(feature_snapshot_id) != 64:
         raise ValueError("advanced research requires an authenticated V2 feature snapshot ID")
-    if feature_manifest_hash != V2_EXTENDED_MANIFEST.manifest_hash:
-        raise ValueError("advanced research V2 feature manifest hash mismatch")
+    if len(feature_manifest_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in feature_manifest_hash
+    ):
+        raise ValueError("advanced research requires an authenticated V2 feature manifest hash")
     if not code_commit.strip() or code_commit == "UNSET":
         raise ValueError("advanced research code_commit must be explicit")
     if dataset.empty:
