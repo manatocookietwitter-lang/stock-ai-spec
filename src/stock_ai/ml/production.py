@@ -554,11 +554,13 @@ def load_production_feature_snapshot(
     }
     feature_set_id = str(observed["feature_set_id"])
     feature_set_version = str(observed["feature_set_version"])
+    manifest_hash = str(observed.get("manifest_hash", ""))
     manifest = manifests.get(feature_set_id)
     if (
         manifest is None
         or feature_set_version != manifest.feature_set_version
-        or observed.get("manifest_hash") != manifest.manifest_hash
+        or len(manifest_hash) != 64
+        or any(character not in "0123456789abcdef" for character in manifest_hash)
     ):
         raise RuntimeError("production feature manifest is unknown or inconsistent")
     source_snapshot_as_of = datetime.fromisoformat(str(observed["source_snapshot_as_of"]))
@@ -572,7 +574,7 @@ def load_production_feature_snapshot(
     schema = _logical_frame_schema(canonical)
     identity = json.dumps(
         {
-            "manifest_hash": manifest.manifest_hash,
+            "manifest_hash": manifest_hash,
             "feature_set_id": manifest.feature_set_id,
             "source_snapshot_as_of": source_snapshot_as_of.isoformat(),
             "source_snapshot_ids": source_snapshot_ids,
@@ -594,7 +596,7 @@ def load_production_feature_snapshot(
         source_snapshot_ids=source_snapshot_ids,
         feature_set_id=feature_set_id,
         feature_set_version=feature_set_version,
-        manifest_hash=manifest.manifest_hash,
+        manifest_hash=manifest_hash,
         historical_revision_policy=revision_policy,
         historical_revision_status=revision_status,
         rows=int(observed["rows"]),
@@ -857,11 +859,20 @@ def write_production_build_manifest(
 
     if created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("production build created_at must be timezone-aware")
-    if v0.feature_set_id != V0_MANIFEST.feature_set_id:
+    if (
+        v0.feature_set_id != V0_MANIFEST.feature_set_id
+        or v0.feature_set_version != V0_MANIFEST.feature_set_version
+    ):
         raise ValueError("production build V0 manifest mismatch")
-    if v1.feature_set_id != V1_CORE_MANIFEST.feature_set_id:
+    if (
+        v1.feature_set_id != V1_CORE_MANIFEST.feature_set_id
+        or v1.feature_set_version != V1_CORE_MANIFEST.feature_set_version
+    ):
         raise ValueError("production build V1 manifest mismatch")
-    if v2.feature_set_id != V2_EXTENDED_MANIFEST.feature_set_id:
+    if (
+        v2.feature_set_id != V2_EXTENDED_MANIFEST.feature_set_id
+        or v2.feature_set_version != V2_EXTENDED_MANIFEST.feature_set_version
+    ):
         raise ValueError("production build V2 manifest mismatch")
     snapshots = (v0, v1, v2)
     if any(
@@ -878,9 +889,9 @@ def write_production_build_manifest(
         "dataset_snapshot_id": dataset.snapshot_id,
     }
     required_dataset_manifests = {
-        (V0_MANIFEST.feature_set_version, V0_MANIFEST.manifest_hash),
-        (V1_CORE_MANIFEST.feature_set_version, V1_CORE_MANIFEST.manifest_hash),
-        (V2_EXTENDED_MANIFEST.feature_set_version, V2_EXTENDED_MANIFEST.manifest_hash),
+        (v0.feature_set_version, v0.manifest_hash),
+        (v1.feature_set_version, v1.manifest_hash),
+        (v2.feature_set_version, v2.manifest_hash),
     }
     if set(dataset.feature_manifests) != required_dataset_manifests:
         raise ValueError("production dataset does not authenticate the exact V0/V1/V2 manifests")
@@ -996,11 +1007,11 @@ def load_production_build_manifest(manifest_path: Path) -> ProductionBuildManife
         raise RuntimeError("production build references the wrong snapshot identity")
     if (
         v0.feature_set_id != V0_MANIFEST.feature_set_id
-        or v0.manifest_hash != V0_MANIFEST.manifest_hash
+        or v0.feature_set_version != V0_MANIFEST.feature_set_version
         or v1.feature_set_id != V1_CORE_MANIFEST.feature_set_id
-        or v1.manifest_hash != V1_CORE_MANIFEST.manifest_hash
+        or v1.feature_set_version != V1_CORE_MANIFEST.feature_set_version
         or v2.feature_set_id != V2_EXTENDED_MANIFEST.feature_set_id
-        or v2.manifest_hash != V2_EXTENDED_MANIFEST.manifest_hash
+        or v2.feature_set_version != V2_EXTENDED_MANIFEST.feature_set_version
     ):
         raise RuntimeError("production build feature-set role mismatch")
     if not (
@@ -1022,9 +1033,9 @@ def load_production_build_manifest(manifest_path: Path) -> ProductionBuildManife
         raise RuntimeError("production build source cutoff mismatch")
     _validate_build_observation_contract(v0, v1, v2, dataset, error_type=RuntimeError)
     required_dataset_manifests = {
-        (V0_MANIFEST.feature_set_version, V0_MANIFEST.manifest_hash),
-        (V1_CORE_MANIFEST.feature_set_version, V1_CORE_MANIFEST.manifest_hash),
-        (V2_EXTENDED_MANIFEST.feature_set_version, V2_EXTENDED_MANIFEST.manifest_hash),
+        (v0.feature_set_version, v0.manifest_hash),
+        (v1.feature_set_version, v1.manifest_hash),
+        (v2.feature_set_version, v2.manifest_hash),
     }
     if set(dataset.feature_manifests) != required_dataset_manifests:
         raise RuntimeError("production build dataset feature lineage mismatch")
@@ -1097,6 +1108,12 @@ def _feature_snapshot_from_metadata(parquet_path: Path) -> ProductionFeatureSnap
         parquet_path=parquet_path,
         metadata_path=parquet_path.with_suffix(".json"),
     )
+
+
+def load_production_feature_snapshot_metadata(parquet_path: Path) -> ProductionFeatureSnapshot:
+    """Read authenticated-build feature metadata without materializing its Parquet frame."""
+
+    return _feature_snapshot_from_metadata(parquet_path)
 
 
 def _dataset_snapshot_from_metadata(parquet_path: Path) -> ProductionDatasetSnapshot:

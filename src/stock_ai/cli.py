@@ -99,6 +99,7 @@ from stock_ai.ml import (
     load_production_build_manifest,
     load_production_dataset_snapshot,
     load_production_feature_snapshot,
+    load_production_feature_snapshot_metadata,
     reserve_locked_final_holdout,
     run_advanced_research,
     run_morning_research,
@@ -1049,7 +1050,8 @@ def research_advanced(
         # The authenticated Build Manifest already verifies the V2 snapshot.  Loading the
         # full V2 Parquet again here would retain a second four-million-row frame beside the
         # research dataset for no additional integrity guarantee.
-        authenticated_feature_snapshot_id = build.v2_snapshot_id
+        v2_snapshot = load_production_feature_snapshot_metadata(build.v2_parquet_path)
+        authenticated_feature_snapshot_id = v2_snapshot.snapshot_id
         snapshot, dataset = load_production_dataset_snapshot(build.dataset_parquet_path)
         run = run_advanced_research(
             dataset,
@@ -1057,8 +1059,8 @@ def research_advanced(
             created_at=created_at,
             code_commit=code_commit,
             config=config,
-            feature_snapshot_id=build.v2_snapshot_id,
-            feature_manifest_hash=V2_EXTENDED_MANIFEST.manifest_hash,
+            feature_snapshot_id=v2_snapshot.snapshot_id,
+            feature_manifest_hash=v2_snapshot.manifest_hash,
         )
         metadata_path, oof_path = write_advanced_research_run(run, report_root)
         # Read through the authenticated boundary before declaring publication complete.

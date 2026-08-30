@@ -43,6 +43,7 @@ from stock_ai.ml.production import (
     load_production_build_manifest,
     load_production_dataset_snapshot,
     load_production_feature_snapshot,
+    load_production_feature_snapshot_metadata,
     run_production_walk_forward_baselines,
     write_production_baseline_report,
     write_production_build_manifest,
@@ -302,6 +303,24 @@ def test_production_pipeline_is_point_in_time_and_uses_fixed_calendar_labels(
     )
     assert loaded_feature_snapshot.snapshot_id == feature_snapshot.snapshot_id
     assert len(loaded_features) == feature_snapshot.rows
+    historical_manifest = V1_CORE_MANIFEST.model_copy(update={"code_commit": "historical-commit"})
+    historical_feature_snapshot = write_production_feature_snapshot(
+        feature_sets.v1_core,
+        tmp_path / "features-historical-manifest",
+        manifest=historical_manifest,
+        source_snapshot_as_of=source_as_of,
+        source_snapshot_ids=bundle.source_snapshot_ids,
+        as_of=datetime(2026, 8, 25, tzinfo=UTC),
+        created_at=datetime(2026, 8, 25, 0, 1, tzinfo=UTC),
+    )
+    loaded_historical, _ = load_production_feature_snapshot(
+        historical_feature_snapshot.parquet_path
+    )
+    assert loaded_historical.manifest_hash == historical_manifest.manifest_hash
+    assert (
+        load_production_feature_snapshot_metadata(historical_feature_snapshot.parquet_path)
+        == historical_feature_snapshot
+    )
     v0_snapshot = write_production_feature_snapshot(
         feature_sets.v0,
         tmp_path / "features-v0",
