@@ -607,3 +607,26 @@ J-Quants取得内容やcredentialを返さない。
 この変更はlocalhost実運用PWA/APIの公開を許可しない。localhost service、append-only台帳、`data/live`、
 Production Datasetは従来どおりInternetへ公開・同期しない。Sitesへのpublic deploymentは、この限定画面の
 検証済みversionだけに適用する。
+
+### D068 — 実口座状態は手入力を初期運用の正本とし、SBI CSVを必須にしない
+
+2026-08-29のユーザー明示指示により、現在保有、account bucket（NISA / 特定口座等）、利用可能現金、
+reserved cash、取得単価、税・NISA入力はlocal運用PWAでのユーザー手入力を初期運用の正本とする。
+SBI等の実口座CSV提供・broker固有mappingは、モデル研究、Production Dataset生成、Champion候補選定、
+Paper運用開始の必須条件にしない。
+
+既存のCSV preview / reconciliation機能は任意の将来入力手段として残す。手入力でも未提供項目をfixtureや
+推測値で補完せず、実提案生成時は必要な口座・現金・税入力の完全性を従来どおりfail closedで検証する。
+この決定はbroker login、注文送信・変更・取消を許可しない。
+
+### D069 — Production artifact identityは論理値をhashし、検証はメモリ境界付きで行う
+
+実データでは固定オフセット日時がParquet往復で`ns / UTC+09:00`から`us / pytz.FixedOffset`へ変わり、
+同一時刻でもpandasの物理dtype依存hashが変わることを確認した。Production feature / Datasetのcontent identityは、
+aware datetimeをUTC nanosecond、naive datetime / timedeltaをnanosecond、floatをfloat64かつNaN・signed zero正規化、
+nullable integer / boolean / stringを明示logical型へ正規化してから列順・行順込みでhashする。
+Parquet file SHA-256とmetadata hashも従来どおり必須とし、logical content hashの代替にしない。
+
+405万行規模で全feature列を一括copyしたり、V0 / V1 / V2 / Datasetを同時loadして検証してはならない。
+無限値cleaningは1列ずつ行い、Build Manifestは各snapshotを順次content認証した後、Datasetとのkey一致とfeature値一致を
+最大8列ずつ比較する。resource不足時に行削減や近似比較へfallbackせずfail closedする。

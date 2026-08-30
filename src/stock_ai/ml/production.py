@@ -271,6 +271,15 @@ def build_production_feature_sets(bundle: ProductionDataBundle) -> ProductionFea
             "sector_revision_available_at",
             "financial_revision_available_at",
         ]
+        # A lineage source can be entirely absent for an observation range (for
+        # example before the first financial disclosure). Parquet/Pandas may
+        # then materialize that merged column as float NaN beside timezone-aware
+        # timestamps. Coerce every component to one datetime dtype before the
+        # row-wise maximum so missing lineage remains NaT.
+        for column in revision_columns:
+            frame[column] = pd.to_datetime(frame[column], utc=True, errors="coerce").astype(
+                "datetime64[ns, UTC]"
+            )
         frame["source_revision_available_at"] = frame[revision_columns].max(axis=1)
         if bundle.revision_policy is HistoricalRevisionPolicy.STRICT_AS_KNOWN:
             frame["available_at"] = frame[["available_at", "source_revision_available_at"]].max(
@@ -434,7 +443,7 @@ def write_production_feature_snapshot(
     ].copy()
     revision_policy, revision_status = _revision_contract(safe)
     canonical = safe.sort_values(["trading_date", "symbol"]).reset_index(drop=True)
-    schema = tuple((str(column), str(dtype)) for column, dtype in canonical.dtypes.items())
+    schema = _logical_frame_schema(canonical)
     metadata_identity = json.dumps(
         {
             "manifest_hash": manifest.manifest_hash,
@@ -448,8 +457,8 @@ def write_production_feature_snapshot(
         },
         sort_keys=True,
     ).encode()
-    row_hashes = pd.util.hash_pandas_object(canonical, index=False).to_numpy().tobytes()
-    snapshot_id = hashlib.sha256(metadata_identity + row_hashes).hexdigest()
+    content_digest = _stable_frame_content_digest(canonical)
+    snapshot_id = hashlib.sha256(metadata_identity + content_digest).hexdigest()
     destination.mkdir(parents=True, exist_ok=True)
     snapshot_directory = destination / snapshot_id
     parquet_path = snapshot_directory / f"{snapshot_id}.parquet"
@@ -477,14 +486,10 @@ def write_production_feature_snapshot(
             expected_metadata=metadata,
         )
         existing = pd.read_parquet(parquet_path)
-        existing_rows = (
-            pd.util.hash_pandas_object(
-                existing.sort_values(["trading_date", "symbol"]).reset_index(drop=True), index=False
-            )
-            .to_numpy()
-            .tobytes()
+        existing_content = _stable_frame_content_digest(
+            existing.sort_values(["trading_date", "symbol"]).reset_index(drop=True)
         )
-        if hashlib.sha256(metadata_identity + existing_rows).hexdigest() != snapshot_id:
+        if hashlib.sha256(metadata_identity + existing_content).hexdigest() != snapshot_id:
             raise RuntimeError("existing production feature snapshot failed content validation")
         observed = json.loads(metadata_path.read_text(encoding="utf-8"))
         snapshot_created_at = datetime.fromisoformat(str(observed["created_at"]))
@@ -564,7 +569,7 @@ def load_production_feature_snapshot(
     revision_policy = str(observed["historical_revision_policy"])
     revision_status = CapabilityStatus(str(observed["historical_revision_status"]))
     canonical = frame.sort_values(["trading_date", "symbol"]).reset_index(drop=True)
-    schema = tuple((str(column), str(dtype)) for column, dtype in canonical.dtypes.items())
+    schema = _logical_frame_schema(canonical)
     identity = json.dumps(
         {
             "manifest_hash": manifest.manifest_hash,
@@ -578,8 +583,8 @@ def load_production_feature_snapshot(
         },
         sort_keys=True,
     ).encode()
-    rows = pd.util.hash_pandas_object(canonical, index=False).to_numpy().tobytes()
-    if hashlib.sha256(identity + rows).hexdigest() != snapshot_id:
+    content_digest = _stable_frame_content_digest(canonical)
+    if hashlib.sha256(identity + content_digest).hexdigest() != snapshot_id:
         raise RuntimeError("production feature content identity mismatch")
     snapshot = ProductionFeatureSnapshot(
         snapshot_id=snapshot_id,
@@ -879,22 +884,11 @@ def write_production_build_manifest(
     }
     if set(dataset.feature_manifests) != required_dataset_manifests:
         raise ValueError("production dataset does not authenticate the exact V0/V1/V2 manifests")
-    loaded_v0, v0_frame = load_production_feature_snapshot(v0.parquet_path)
-    loaded_v1, v1_frame = load_production_feature_snapshot(v1.parquet_path)
-    loaded_v2, v2_frame = load_production_feature_snapshot(v2.parquet_path)
-    loaded_dataset, dataset_frame = load_production_dataset_snapshot(dataset.parquet_path)
-    if (
-        loaded_v0.snapshot_id,
-        loaded_v1.snapshot_id,
-        loaded_v2.snapshot_id,
-        loaded_dataset.snapshot_id,
-    ) != (v0.snapshot_id, v1.snapshot_id, v2.snapshot_id, dataset.snapshot_id):
-        raise ValueError("production build input paths do not authenticate the supplied snapshots")
-    _validate_build_feature_content(
-        v0_frame,
-        v1_frame,
-        v2_frame,
-        dataset_frame,
+    _authenticate_build_snapshot_paths(
+        v0,
+        v1,
+        v2,
+        dataset,
         error_type=ValueError,
     )
     build_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -985,12 +979,14 @@ def load_production_build_manifest(manifest_path: Path) -> ProductionBuildManife
     recomputed = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     if recomputed != build_id:
         raise RuntimeError("production build content identity mismatch")
-    v0, v0_frame = load_production_feature_snapshot(Path(str(observed["v0_parquet_path"])))
-    v1, v1_frame = load_production_feature_snapshot(Path(str(observed["v1_parquet_path"])))
-    v2, v2_frame = load_production_feature_snapshot(Path(str(observed["v2_parquet_path"])))
-    dataset, dataset_frame = load_production_dataset_snapshot(
-        Path(str(observed["dataset_parquet_path"]))
-    )
+    v0_path = Path(str(observed["v0_parquet_path"]))
+    v1_path = Path(str(observed["v1_parquet_path"]))
+    v2_path = Path(str(observed["v2_parquet_path"]))
+    dataset_path = Path(str(observed["dataset_parquet_path"]))
+    v0 = _feature_snapshot_from_metadata(v0_path)
+    v1 = _feature_snapshot_from_metadata(v1_path)
+    v2 = _feature_snapshot_from_metadata(v2_path)
+    dataset = _dataset_snapshot_from_metadata(dataset_path)
     if (v0.snapshot_id, v1.snapshot_id, v2.snapshot_id, dataset.snapshot_id) != (
         identity["v0_snapshot_id"],
         identity["v1_snapshot_id"],
@@ -1032,11 +1028,11 @@ def load_production_build_manifest(manifest_path: Path) -> ProductionBuildManife
     }
     if set(dataset.feature_manifests) != required_dataset_manifests:
         raise RuntimeError("production build dataset feature lineage mismatch")
-    _validate_build_feature_content(
-        v0_frame,
-        v1_frame,
-        v2_frame,
-        dataset_frame,
+    _authenticate_build_snapshot_paths(
+        v0,
+        v1,
+        v2,
+        dataset,
         error_type=RuntimeError,
     )
     return ProductionBuildManifest(
@@ -1077,6 +1073,127 @@ def _validate_build_observation_contract(
         for item in artifacts[:-1]
     ):
         raise error_type("production build snapshots do not share one revision status")
+
+
+def _feature_snapshot_from_metadata(parquet_path: Path) -> ProductionFeatureSnapshot:
+    parquet_path = parquet_path.resolve()
+    observed = json.loads(parquet_path.with_suffix(".json").read_text(encoding="utf-8"))
+    return ProductionFeatureSnapshot(
+        snapshot_id=str(observed["snapshot_id"]),
+        created_at=datetime.fromisoformat(str(observed["created_at"])),
+        as_of=datetime.fromisoformat(str(observed["as_of"])),
+        source_snapshot_as_of=datetime.fromisoformat(str(observed["source_snapshot_as_of"])),
+        source_snapshot_ids=tuple(
+            (str(item[0]), str(item[1])) for item in observed["source_snapshot_ids"]
+        ),
+        feature_set_id=str(observed["feature_set_id"]),
+        feature_set_version=str(observed["feature_set_version"]),
+        manifest_hash=str(observed["manifest_hash"]),
+        historical_revision_policy=str(observed["historical_revision_policy"]),
+        historical_revision_status=CapabilityStatus(
+            str(observed["historical_revision_status"])
+        ),
+        rows=int(observed["rows"]),
+        parquet_path=parquet_path,
+        metadata_path=parquet_path.with_suffix(".json"),
+    )
+
+
+def _dataset_snapshot_from_metadata(parquet_path: Path) -> ProductionDatasetSnapshot:
+    parquet_path = parquet_path.resolve()
+    observed = json.loads(parquet_path.with_suffix(".json").read_text(encoding="utf-8"))
+    return ProductionDatasetSnapshot(
+        snapshot_id=str(observed["snapshot_id"]),
+        created_at=datetime.fromisoformat(str(observed["created_at"])),
+        as_of=datetime.fromisoformat(str(observed["as_of"])),
+        source_snapshot_as_of=datetime.fromisoformat(str(observed["source_snapshot_as_of"])),
+        source_snapshot_ids=tuple(
+            (str(item[0]), str(item[1])) for item in observed["source_snapshot_ids"]
+        ),
+        feature_manifests=tuple(
+            (str(item[0]), str(item[1])) for item in observed["feature_manifests"]
+        ),
+        target_definition=str(observed["target_definition"]),
+        label_1230_status=CapabilityStatus(str(observed["label_1230_status"])),
+        historical_revision_policy=str(observed["historical_revision_policy"]),
+        historical_revision_status=CapabilityStatus(
+            str(observed["historical_revision_status"])
+        ),
+        rows=int(observed["rows"]),
+        data_start=str(observed["data_start"]),
+        data_end=str(observed["data_end"]),
+        parquet_path=parquet_path,
+        metadata_path=parquet_path.with_suffix(".json"),
+    )
+
+
+def _authenticate_build_snapshot_paths(
+    v0: ProductionFeatureSnapshot,
+    v1: ProductionFeatureSnapshot,
+    v2: ProductionFeatureSnapshot,
+    dataset: ProductionDatasetSnapshot,
+    *,
+    error_type: type[ValueError] | type[RuntimeError],
+) -> None:
+    for expected in (v0, v1, v2):
+        try:
+            loaded, frame = load_production_feature_snapshot(expected.parquet_path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise error_type(str(exc)) from None
+        if loaded.snapshot_id != expected.snapshot_id:
+            raise error_type("production build feature path identity mismatch")
+        del frame
+    try:
+        loaded_dataset, dataset_frame = load_production_dataset_snapshot(dataset.parquet_path)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise error_type(str(exc)) from None
+    if loaded_dataset.snapshot_id != dataset.snapshot_id:
+        raise error_type("production build dataset path identity mismatch")
+    del dataset_frame
+    _validate_build_feature_parquet_content(v0, v1, v2, dataset, error_type=error_type)
+
+
+def _validate_build_feature_parquet_content(
+    v0: ProductionFeatureSnapshot,
+    v1: ProductionFeatureSnapshot,
+    v2: ProductionFeatureSnapshot,
+    dataset: ProductionDatasetSnapshot,
+    *,
+    error_type: type[ValueError] | type[RuntimeError],
+    chunk_size: int = 8,
+) -> None:
+    keys = ["symbol", "trading_date"]
+    for snapshot, manifest in (
+        (v0, V0_MANIFEST),
+        (v1, V1_CORE_MANIFEST),
+        (v2, V2_EXTENDED_MANIFEST),
+    ):
+        try:
+            observed_keys = pd.read_parquet(snapshot.parquet_path, columns=keys)
+            embedded_keys = pd.read_parquet(dataset.parquet_path, columns=keys)
+            pd.testing.assert_frame_equal(
+                observed_keys,
+                embedded_keys,
+                check_dtype=False,
+                check_exact=True,
+            )
+            del observed_keys, embedded_keys
+            names = manifest.feature_names
+            for start in range(0, len(names), chunk_size):
+                columns = list(names[start : start + chunk_size])
+                observed = pd.read_parquet(snapshot.parquet_path, columns=columns)
+                embedded = pd.read_parquet(dataset.parquet_path, columns=columns)
+                pd.testing.assert_frame_equal(
+                    observed,
+                    embedded,
+                    check_dtype=False,
+                    check_exact=True,
+                )
+                del observed, embedded
+        except (AssertionError, OSError, ValueError) as exc:
+            raise error_type(
+                f"production dataset feature values do not match {manifest.feature_set_id}: {exc}"
+            ) from None
 
 
 def _validate_build_feature_content(
@@ -1610,8 +1727,8 @@ def _production_frame_hash(
     historical_revision_status: CapabilityStatus,
 ) -> str:
     canonical = frame.sort_values(["trading_date", "symbol"]).reset_index(drop=True)
-    row_hashes = pd.util.hash_pandas_object(canonical, index=False).to_numpy().tobytes()
-    schema = tuple((str(column), str(dtype)) for column, dtype in canonical.dtypes.items())
+    content_digest = _stable_frame_content_digest(canonical)
+    schema = _logical_frame_schema(canonical)
     metadata = json.dumps(
         {
             "feature_manifests": feature_manifests,
@@ -1626,7 +1743,88 @@ def _production_frame_hash(
         },
         sort_keys=True,
     ).encode("utf-8")
-    return hashlib.sha256(metadata + row_hashes).hexdigest()
+    return hashlib.sha256(metadata + content_digest).hexdigest()
+
+
+def _logical_frame_schema(frame: pd.DataFrame) -> tuple[tuple[str, str], ...]:
+    return tuple((str(column), _logical_series_kind(frame[column])) for column in frame.columns)
+
+
+def _logical_series_kind(series: pd.Series) -> str:
+    dtype = series.dtype
+    if isinstance(dtype, pd.DatetimeTZDtype):
+        return "datetime64[ns, UTC]"
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return "datetime64[ns]"
+    if pd.api.types.is_timedelta64_dtype(dtype):
+        return "timedelta64[ns]"
+    if pd.api.types.is_bool_dtype(dtype):
+        return "boolean"
+    if pd.api.types.is_integer_dtype(dtype):
+        return "integer64"
+    if pd.api.types.is_float_dtype(dtype):
+        return "float64"
+    return "string"
+
+
+def _stable_frame_content_digest(frame: pd.DataFrame) -> bytes:
+    """Hash logical values independently of Parquet/Pandas physical dtypes."""
+
+    digest = hashlib.sha256()
+    schema = _logical_frame_schema(frame)
+    digest.update(json.dumps(schema, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    digest.update(len(frame).to_bytes(8, "little", signed=False))
+    for column, kind in schema:
+        series = frame[column]
+        digest.update(column.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(kind.encode("ascii"))
+        digest.update(b"\0")
+        if kind == "datetime64[ns, UTC]":
+            utc_values = (
+                pd.to_datetime(series, utc=True, errors="coerce")
+                .astype("int64")
+                .to_numpy(dtype="<i8", copy=True)
+            )
+            digest.update(utc_values.tobytes())
+        elif kind == "datetime64[ns]":
+            datetime_values = (
+                pd.to_datetime(series, errors="coerce")
+                .astype("datetime64[ns]")
+                .astype("int64")
+                .to_numpy(dtype="<i8", copy=True)
+            )
+            digest.update(datetime_values.tobytes())
+        elif kind == "timedelta64[ns]":
+            timedelta_values = (
+                pd.to_timedelta(series, errors="coerce")
+                .astype("timedelta64[ns]")
+                .astype("int64")
+                .to_numpy(dtype="<i8", copy=True)
+            )
+            digest.update(timedelta_values.tobytes())
+        elif kind == "float64":
+            float_values = series.to_numpy(dtype="float64", na_value=np.nan, copy=True)
+            float_values[np.isnan(float_values)] = np.nan
+            float_values[float_values == 0.0] = 0.0
+            digest.update(np.ascontiguousarray(float_values, dtype="<f8").tobytes())
+        elif kind == "integer64":
+            missing = series.isna().to_numpy(dtype="uint8", copy=True)
+            integer_values = series.fillna(0).to_numpy(dtype="int64", copy=True)
+            digest.update(missing.tobytes())
+            digest.update(np.ascontiguousarray(integer_values, dtype="<i8").tobytes())
+        elif kind == "boolean":
+            boolean_values = series.astype("boolean").to_numpy(
+                dtype="uint8", na_value=2, copy=True
+            )
+            digest.update(boolean_values.tobytes())
+        else:
+            string_values = series.astype("string[python]")
+            hashes = pd.util.hash_pandas_object(string_values, index=False).to_numpy(
+                dtype="<u8", copy=True
+            )
+            digest.update(hashes.tobytes())
+    return digest.digest()
 
 
 def _publish_snapshot_bundle(

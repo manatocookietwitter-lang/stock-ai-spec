@@ -487,9 +487,15 @@ class FeatureEngine:
                 f"feature implementation is missing manifest columns: {missing_outputs}"
             )
         result = computed[selected].sort_values(["trading_date", "symbol"]).reset_index(drop=True)
-        result.loc[:, list(self.manifest.feature_names)] = result.loc[
-            :, list(self.manifest.feature_names)
-        ].replace([np.inf, -np.inf], np.nan)
+        # Clean one feature at a time. Selecting and replacing the complete
+        # feature matrix creates another dense copy (multiple GiB on the real
+        # Production Dataset) and can fail despite sufficient steady-state
+        # memory. The column-wise mask is numerically identical and keeps the
+        # temporary allocation bounded by one column.
+        for column in self.manifest.feature_names:
+            infinite = np.isinf(result[column].to_numpy(dtype="float64", copy=False))
+            if infinite.any():
+                result.loc[infinite, column] = np.nan
         return result
 
     def latest_snapshot(

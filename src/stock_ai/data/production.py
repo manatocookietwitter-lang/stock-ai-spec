@@ -283,8 +283,18 @@ def _bounded_business_dates(
     """Use the contiguous common provider coverage, rejecting internal date gaps."""
 
     calendar_dates = _business_dates(calendar)
+    _require_columns(
+        master,
+        {"effective_date", "provider_code", "market_code"},
+        "security master",
+    )
+    provider_codes = master["provider_code"].astype("string")
+    market_codes = master["market_code"].astype("string")
+    eligible_master = master.loc[
+        provider_codes.str.endswith("0", na=False) & market_codes.isin(_ELIGIBLE_MARKETS)
+    ]
     source_columns = (
-        ("security master", master, "effective_date"),
+        ("eligible security master", eligible_master, "effective_date"),
         ("daily prices", prices, "trading_date"),
         ("TOPIX", topix, "trading_date"),
     )
@@ -347,9 +357,42 @@ def _canonical_daily(
     _require_columns(prices, required, "daily prices")
     frame = prices.copy()
     frame["trading_date"] = pd.to_datetime(frame["trading_date"]).dt.normalize()
+    frame["provider_code"] = frame["provider_code"].astype("string")
+    if frame.duplicated(["trading_date", "provider_code"]).any():
+        raise ValueError("daily prices contain duplicate trading_date/provider_code rows")
+    members = universe.rename(columns={"effective_date": "trading_date"})
+    member_columns = [
+        "trading_date",
+        "provider_code",
+        "symbol",
+        "sector_33_code",
+        "sector_33_name",
+    ]
+    frame = frame.merge(
+        members[member_columns],
+        on=["trading_date", "provider_code", "symbol"],
+        how="inner",
+        validate="one_to_one",
+    )
     if frame.duplicated(["trading_date", "symbol"]).any():
-        raise ValueError("daily prices contain duplicate trading_date/symbol rows")
+        raise ValueError("PIT-universe daily prices contain duplicate trading_date/symbol rows")
+    raw_ohlc = frame.reindex(columns=["raw_open", "raw_high", "raw_low", "raw_close"])
+    adjusted_ohlcv = frame.reindex(
+        columns=[
+            "research_open",
+            "research_high",
+            "research_low",
+            "research_close",
+            "research_volume",
+        ]
+    )
+    no_trade = (
+        raw_ohlc.isna().all(axis=1)
+        & adjusted_ohlcv.isna().all(axis=1)
+        & frame.reindex(columns=["raw_volume", "trading_value"]).isna().all(axis=1)
+    )
     frame = _reconstruct_bulk_adjusted_prices(frame)
+    frame = frame.loc[~no_trade].copy()
     frame["revision_available_at"] = pd.to_datetime(frame["available_at"], utc=True)
     frame["available_at"] = frame["trading_date"].map(availability)
     session_position = {day: index for index, day in enumerate(sorted(availability))}
@@ -358,14 +401,6 @@ def _canonical_daily(
     if revision_policy is HistoricalRevisionPolicy.STRICT_AS_KNOWN:
         frame["available_at"] = frame[["available_at", "revision_available_at"]].max(axis=1)
 
-    members = universe.rename(columns={"effective_date": "trading_date"})
-    member_columns = ["trading_date", "symbol", "sector_33_code", "sector_33_name"]
-    frame = frame.merge(
-        members[member_columns],
-        on=["trading_date", "symbol"],
-        how="inner",
-        validate="one_to_one",
-    )
     observed_dates = set(frame["trading_date"])
     missing_price_dates = set(availability) - observed_dates
     if missing_price_dates:
@@ -531,8 +566,12 @@ def _daily_financial_features(
     }
     _require_columns(disclosures, required, "financial summary")
     right = disclosures.copy()
-    right["revision_available_at"] = pd.to_datetime(right["available_at"], utc=True)
-    right["available_at"] = pd.to_datetime(right["announced_at"], utc=True)
+    right["revision_available_at"] = pd.to_datetime(right["available_at"], utc=True).astype(
+        "datetime64[ns, UTC]"
+    )
+    right["available_at"] = pd.to_datetime(right["announced_at"], utc=True).astype(
+        "datetime64[ns, UTC]"
+    )
     if revision_policy is HistoricalRevisionPolicy.STRICT_AS_KNOWN:
         right["available_at"] = right[["available_at", "revision_available_at"]].max(axis=1)
     right["period_end"] = pd.to_datetime(right["period_end"], errors="coerce").dt.normalize()
@@ -609,6 +648,9 @@ def _daily_financial_features(
         left_columns = left[["symbol", "trading_date", "available_at", "close"]].sort_values(
             "available_at"
         )
+        left_columns["available_at"] = pd.to_datetime(
+            left_columns["available_at"], utc=True
+        ).astype("datetime64[ns, UTC]")
         if source.empty:
             merged = left_columns.copy()
             for column in right_columns[1:]:
@@ -625,6 +667,9 @@ def _daily_financial_features(
                     "revision_available_at": "financial_revision_available_at",
                 }
             )
+            source["financial_available_at"] = pd.to_datetime(
+                source["financial_available_at"], utc=True
+            ).astype("datetime64[ns, UTC]")
             merged = pd.merge_asof(
                 left_columns,
                 source,

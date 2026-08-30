@@ -91,6 +91,77 @@ def test_bulk_adjusted_prices_follow_official_cumulative_factor_formula() -> Non
     assert changed.loc[0, "adjustment_version"] != adjusted.loc[0, "adjustment_version"]
 
 
+def test_production_coverage_starts_at_first_eligible_market_snapshot() -> None:
+    dates = pd.bdate_range("2022-03-31", periods=4)
+    calendar = pd.DataFrame(
+        {"trading_date": dates, "is_equity_business_day": True}
+    )
+    master = pd.DataFrame(
+        {
+            "effective_date": dates,
+            "provider_code": "13010",
+            "market_code": ["0101", "0101", "0111", "0111"],
+        }
+    )
+    prices = pd.DataFrame({"trading_date": dates})
+    topix = pd.DataFrame({"trading_date": dates})
+
+    bounded = production_module._bounded_business_dates(
+        calendar,
+        master=master,
+        prices=prices,
+        topix=topix,
+    )
+
+    assert bounded.tolist() == dates[2:].tolist()
+
+
+def test_canonical_daily_joins_common_issues_by_provider_code() -> None:
+    trading_date = pd.Timestamp("2025-01-06")
+    revision_at = pd.Timestamp("2026-08-24T00:00:00Z")
+    prices = pd.DataFrame(
+        {
+            "trading_date": [trading_date, trading_date, trading_date],
+            "provider_code": ["25930", "25935", "99990"],
+            "symbol": ["2593", "2593", "9999"],
+            "raw_open": [995.0, 895.0, np.nan],
+            "raw_high": [1010.0, 910.0, np.nan],
+            "raw_low": [990.0, 890.0, np.nan],
+            "raw_close": [1000.0, 900.0, np.nan],
+            "raw_volume": [1000.0, 100.0, np.nan],
+            "trading_value": [1_000_000.0, 100_000.0, np.nan],
+            "adjustment_factor": [1.0, 1.0, 1.0],
+            "research_open": [995.0, 895.0, np.nan],
+            "research_high": [1010.0, 910.0, np.nan],
+            "research_low": [990.0, 890.0, np.nan],
+            "research_close": [1000.0, 900.0, np.nan],
+            "research_volume": [1000.0, 100.0, np.nan],
+            "adjustment_version": ["adjustment-v1", "adjustment-v1", "adjustment-v1"],
+            "available_at": [revision_at, revision_at, revision_at],
+        }
+    )
+    universe = pd.DataFrame(
+        {
+            "effective_date": [trading_date, trading_date],
+            "provider_code": ["25930", "99990"],
+            "symbol": ["2593", "9999"],
+            "sector_33_code": ["10", "20"],
+            "sector_33_name": ["Sector 10", "Sector 20"],
+        }
+    )
+    availability = {trading_date: pd.Timestamp("2025-01-07T02:30:00Z")}
+
+    daily = production_module._canonical_daily(
+        prices,
+        universe=universe,
+        availability=availability,
+        revision_policy=HistoricalRevisionPolicy.SINGLE_VINTAGE_AS_REVISED,
+    )
+
+    assert daily["provider_code"].tolist() == ["25930"]
+    assert daily["symbol"].tolist() == ["2593"]
+
+
 class FrameCatalog:
     def __init__(self, frames: dict[DatasetName, pd.DataFrame]) -> None:
         self.frames = frames
@@ -841,6 +912,23 @@ def test_revision_policy_and_missing_share_components_fail_closed() -> None:
     assert set(strict_dataset["label_status_5d"]) == {"BLOCKED_BY_REVISION_HISTORY"}
 
 
+def test_feature_lineage_accepts_an_entirely_missing_revision_source() -> None:
+    frames, _dates = _source_frames()
+    source_as_of = datetime(2026, 8, 24, tzinfo=UTC)
+    bundle = build_production_data(  # type: ignore[arg-type]
+        FrameCatalog(frames),
+        source_snapshot_as_of=source_as_of,
+        minimum_market_coverage=0.60,
+    )
+    financials = bundle.financials.copy()
+    financials["financial_revision_available_at"] = np.nan
+
+    features = build_production_feature_sets(replace(bundle, financials=financials)).v1_core
+
+    assert str(features["source_revision_available_at"].dtype) == "datetime64[ns, UTC]"
+    assert features["source_revision_available_at"].notna().all()
+
+
 def test_premium_1230_labels_are_partial_and_snapshot_maturity_is_enforced(
     tmp_path: Path,
 ) -> None:
@@ -1013,4 +1101,7 @@ def _source_frames() -> tuple[dict[DatasetName, pd.DataFrame], pd.DatetimeIndex]
         DatasetName.TOPIX: pd.DataFrame(topix_rows),
         DatasetName.FINANCIAL_SUMMARY: pd.DataFrame(financial_rows),
     }
+    frames[DatasetName.FINANCIAL_SUMMARY]["announced_at"] = frames[
+        DatasetName.FINANCIAL_SUMMARY
+    ]["announced_at"].astype("datetime64[us, UTC]")
     return frames, dates

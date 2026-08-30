@@ -426,7 +426,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 - Goal 1 labelは12:30 entryやTOPIX/sector excess returnではなく、調整後終値間absolute returnの研究proxy
 - Goal 1 baseline uncertaintyはtraining residual RMSE。Goal 3はOOF calibrated rank-space intervalを持つが、live/full-scale empirical coverageは未評価
-- Goal 2実装とfixture/MockTransport検証は完了し、live catalogは2017〜2020を受入済みだが、2021年以降が未取得のためProduction Dataset / baselineの実データartifactは未生成
+- Goal 2実装とlive acceptanceは完了し、2017-01-04〜2026-08-28のraw/normalized履歴と、現行市場区分が利用可能な2022-04-04以降のProduction Datasetを認証済み。Goal 3実データbaseline / advanced / final holdoutは未実行
 - NISA枠の詳細な機会費用、複数broker/複数税policyのrouter、申告税額は未実装。Tax Engineは意思決定用推定のみ
 - exact discrete optimizerは小さい明示candidate universe用。上限超過は近似解へ切り替えずfail closed
 - JSONL experiment registryは単一process実装でinter-process lock未実装。Goal 2/3 Production snapshotとadvanced reportはdirectory atomic publish + Build Manifestへ移行済み
@@ -437,7 +437,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - `/fins/summary`の`ShOutFY`は期末開示値であり、日次shares outstanding seriesではない
 - J-Quants planは自動判定せず、CLIで宣言したplanより上のendpointをfail closedする
 - Corporate Actionのannouncement時刻と詳細種別はdaily price endpointに存在せず、effective-date adjustment lineageのみ。推測しない
-- 2017〜2020のJPX履歴取得は実測済み。2021年以降の取得とfull Production Datasetでのmemory/time実測は未実施。Goal 3は推定OOF行数/model-fit数をfail closedでboundし、horizon/model-family batchを既定にしたが、scale capabilityは実測完了まで`PARTIAL`
+- 2017〜2026-08-28のJPX履歴取得とfull Production Dataset生成は実測済み。405万8,130行の生成では物理dtype依存hashと一括feature copyを実データで修正し、メモリ境界付き認証まで完了。Goal 3の全family/horizon walk-forward scale capabilityは実run完了まで`PARTIAL`
 - Goal 3 advanced reportはdevelopment OOF専用でlocked holdoutを未開封。liveデータ、複数seed、全horizonの実runと最終holdout評価前にChampion採用しない
 - OOF ensembleの不確実性は日付内rank space。絶対return金額幅へのcalibrationはlive OOSが得られるまで未採用
 - Goal 4 refit bundleとcurrent inferenceは明示的research-only。Goal 5はPaper drift記録を持つが、model weightの承認済み永続registry、live推論時間、十分なlive OOS evidenceが揃うまでChampion採用しない
@@ -449,12 +449,12 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 ## 実データ/APIまでblockedの項目
 
-- 現在のCodex processは環境変数`JQUANTS_API_KEY`が設定済みであることを認識している。値は表示・保存していない。capabilityと2017〜2020のliveデータ品質は実取得で検証済みで、2021年以降の年次Bulk受け入れが未完了
+- 現在のCodex processは環境変数`JQUANTS_API_KEY`が設定済みであることを認識している。値は表示・保存していない。Standard capabilityと2017-01-04〜2026-08-28のliveデータ品質、年次Bulk resume、Production Buildを実取得で検証済み
 - 初回取得以前のprovider correction vintage、完全なlisting/delisting/corporate-action event lineage
 - 11:30時点の前場価格、出来高、market breadth、同時刻履歴
 - 承認済みMorning model registry entry、live OOS比較、11:30締切内の実推論時間
 - 日次shares outstanding、coverage検証済みmarket breadth、需給履歴
-- SBI等の保有・約定CSV mapping、実fee条件、実口座・NISA残枠・税状態
+- 実fee条件と、local PWAへ手入力する実口座・保有・現金・NISA残枠・税状態。SBI等のCSV mappingはD068により任意で、研究のblockerではない
 - spread/slippage/market-impact calibration、live/paper forward observation
 - broker integrationと注文送信は仕様上blockedではなく、製品方針として対象外
 
@@ -462,6 +462,24 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 
 1. Goal 2 checkpoint `f5763e7`、Goal 3 checkpoint `d9b094b`、Goal 4 checkpoint `a2a359d`は作成済み。
 2. Goal 5の全gateとread-only reviewは完了し、このSTATUSを含む外部依存外のclean checkpointを正本とする。
-3. Standard相当Bulkの2017-01-04〜2020-12-30はcheckpoint / resume取得済み。次回は2021-01-01から契約上の最新確定営業日まで年次stageを継続する。
-4. 全取得期間の`data verify`、Production Dataset、Goal 3 development選定と固定、locked holdout単回評価、Goal 4 live OOS、Goal 5 live Paper観測の順に実行し、live-data acceptanceとmodel採否を追記する。
+3. Standard相当Bulkの2017-01-04〜2026-08-28はcheckpoint / resume取得済み。26,030 objectを検証し、Production Build `2fc936a7ca9b939d8016ad3c5efea17c53ffd5264d5ece398a8329bf2f2dfe5f`を固定した。
+4. 次はGoal 3 development-only選定と固定、locked holdout単回評価、Goal 4 live OOS、Goal 5 live Paper観測の順に実行し、model採否を追記する。
 5. broker integrationと自動売買は今後も実装しない。
+
+## 2026-08-29 実データ研究再開
+
+- ユーザー指示によりSBI口座状態CSVを必須条件から外し、local PWAへの手入力を初期運用の正本とした（D068）
+- Goal 3実データ研究は口座入力を待たず、J-Quants capability確認、2021年以降のBulk resume、全履歴verify、Production Dataset生成の順で再開する
+- model / feature / hyperparameter / ensemble weightの選択終了前にlocked final holdoutを評価しない
+
+## 2026-08-30 Goal 2 live acceptance完了
+
+- J-Quants V2 Standard capabilityを実取得で確認。`security_master / daily_prices / research_adjusted_ohlcv / trading_calendar / topix_context / financial_summary / bulk_history`は`AVAILABLE`、`shares_outstanding / historical_point_in_time_universe / market_breadth`は`PARTIAL`、exact 12:30 entry labelは`BLOCKED_BY_DATA_CAPABILITY`、前場intradayと需給は今回scope外
+- raw最大期間は2017-01-04〜2026-08-28（Calendarは2017-01-01開始）。2021〜2025は各49 file、2026-08-28までは105 fileを追加取得し、2021年stage再実行は49 fileすべてskipしてresumeを確認
+- catalogはdaily prices 9,806,149行、financial summary 185,321行、security master 9,878,888行、TOPIX 2,360行、Calendar 3,528行。最終`data verify`は26,030 object、feature snapshot 3、dataset snapshot 1、build 1、status `OK`
+- 現行Prime / Standard / Growthかつcommon issueのPIT universeは2022-04-04から利用可能。Production Dataset `3d837e220b4662d2405dafd295b91645813af6e8ffed8cd52a44988b49847a7d`は2022-04-04〜2026-08-27、1,077営業日、4,144銘柄、4,058,130行
+- 1 / 5 / 20日absolute labelの`AVAILABLE`は4,004,464 / 3,985,623 / 3,924,593行。売買停止・上場廃止・未成熟は理由別statusで保持し、価格をshiftや推測で補完していない
+- Production Buildは`2fc936a7ca9b939d8016ad3c5efea17c53ffd5264d5ece398a8329bf2f2dfe5f`。source cutoffは2026-08-29 23:30 JST、historical revisionは`SINGLE_VINTAGE_AS_REVISED / PARTIAL`のため研究専用で、採用可能性を意味しない
+- 実データで市場区分開始境界、provider code優先株衝突、no-trade行、UTC精度、全欠損lineage、一括feature copy、Parquet物理dtype hash、Build全frame同時保持を修正。旧物理dtype hash bundle 4.77GBは削除せず`artifacts/quarantine/production-physical-hash-v1-20260830`へ隔離した
+- locked final holdoutにはまだ一度もアクセスしていない。Goal 3の全model / feature / hyperparameter / ensemble weight選択をdevelopment期間だけで完了してから単回評価する
+- Goal 2 live acceptance後の全品質gateはRuff / mypy strict（43 source files）/ pytest 195件 / branch coverage 85% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がすべてpass。実データ`data verify`も26,030 object、3 feature snapshot、1 dataset snapshot、1 buildで再度`OK`
