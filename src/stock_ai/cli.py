@@ -1046,17 +1046,19 @@ def research_advanced(
         )
         build = load_production_build_manifest(build_manifest)
         authenticated_build_id = build.build_id
+        # The authenticated Build Manifest already verifies the V2 snapshot.  Loading the
+        # full V2 Parquet again here would retain a second four-million-row frame beside the
+        # research dataset for no additional integrity guarantee.
+        authenticated_feature_snapshot_id = build.v2_snapshot_id
         snapshot, dataset = load_production_dataset_snapshot(build.dataset_parquet_path)
-        v2_snapshot, _ = load_production_feature_snapshot(build.v2_parquet_path)
-        authenticated_feature_snapshot_id = v2_snapshot.snapshot_id
         run = run_advanced_research(
             dataset,
             data_snapshot_id=snapshot.snapshot_id,
             created_at=created_at,
             code_commit=code_commit,
             config=config,
-            feature_snapshot_id=v2_snapshot.snapshot_id,
-            feature_manifest_hash=v2_snapshot.manifest_hash,
+            feature_snapshot_id=build.v2_snapshot_id,
+            feature_manifest_hash=V2_EXTENDED_MANIFEST.manifest_hash,
         )
         metadata_path, oof_path = write_advanced_research_run(run, report_root)
         # Read through the authenticated boundary before declaring publication complete.
