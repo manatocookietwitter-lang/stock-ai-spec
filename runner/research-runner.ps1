@@ -73,15 +73,18 @@ if sys.argv[2] == "verify":
 
 function Assert-SourceProvenance($Payload) {
     $commit = [string]$Payload.code_commit
-    & git -C $ProjectRoot cat-file -e "$commit`^{commit}" 2>$null
+    $safeDirectory = "safe.directory=$($ProjectRoot.Replace('\', '/'))"
+    & git -c $safeDirectory -C $ProjectRoot cat-file -e "$commit`^{commit}" 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "campaign code commit is unavailable: $commit"
     }
-    & git -C $ProjectRoot diff --quiet $commit -- src pyproject.toml uv.lock
+    & git -c $safeDirectory -C $ProjectRoot diff --quiet $commit -- src pyproject.toml uv.lock
     if ($LASTEXITCODE -ne 0) {
         throw 'current model source or dependency lock differs from campaign code commit'
     }
-    $untrackedSource = @(& git -C $ProjectRoot ls-files --others --exclude-standard -- src)
+    $untrackedSource = @(
+        & git -c $safeDirectory -C $ProjectRoot ls-files --others --exclude-standard -- src
+    )
     if ($LASTEXITCODE -ne 0) {
         throw 'unable to authenticate untracked model source state'
     }
@@ -258,7 +261,13 @@ try {
     exit 0
 }
 try {
-    exit (Invoke-Campaign $manifestPath $runnerLogRoot)
+    try {
+        exit (Invoke-Campaign $manifestPath $runnerLogRoot)
+    } catch {
+        $exceptionType = $_.Exception.GetType().FullName
+        Write-RunnerEvent $runnerLogRoot 'RUNNER_FAILED' $exceptionType
+        exit 1
+    }
 } finally {
     if ($null -ne $lock) {
         $lock.Dispose()
