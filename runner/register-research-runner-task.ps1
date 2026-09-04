@@ -42,6 +42,10 @@ $actionDefinition = New-ScheduledTaskAction -Execute $WindowsPowerShell -Argumen
 $atLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $repeating = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5)
 $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -DontStopOnIdleEnd `
+    -Hidden `
     -StartWhenAvailable `
     -MultipleInstances IgnoreNew `
     -RestartCount 3 `
