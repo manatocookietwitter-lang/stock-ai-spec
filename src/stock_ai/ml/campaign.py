@@ -7,14 +7,17 @@ import json
 import os
 import signal
 import tempfile
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from stock_ai.features import V2_EXTENDED_MANIFEST
 from stock_ai.ml.advanced import AdvancedResearchConfig, load_advanced_research_run
+from stock_ai.ml.checkpoint import checkpoint_id_for_provenance, read_checkpoint_status
 
 
 class CampaignBatchStatus(StrEnum):
@@ -258,6 +261,10 @@ def load_campaign_manifest(path: Path) -> ResearchCampaignManifest:
 def load_campaign_build_id(manifest_path: Path) -> str:
     """Authenticate the small build marker; each child authenticates all Parquet content."""
 
+    return str(_load_campaign_build_payload(manifest_path)["build_id"])
+
+
+def _load_campaign_build_payload(manifest_path: Path) -> dict[str, Any]:
     manifest_path = manifest_path.resolve()
     build_id = manifest_path.stem
     if len(build_id) != 64 or manifest_path.parent.name != build_id:
@@ -278,7 +285,132 @@ def load_campaign_build_id(manifest_path: Path) -> str:
     ).hexdigest()
     if observed.get("metadata_hash") != metadata_hash:
         raise RuntimeError("production build metadata hash mismatch")
-    return build_id
+    return observed
+
+
+def campaign_batch_checkpoint_path(
+    manifest: ResearchCampaignManifest,
+    batch: ResearchCampaignBatch,
+) -> Path | None:
+    """Derive a v2 batch checkpoint path without creating or changing progress."""
+
+    if manifest.schema_version != "research-campaign-manifest-v2":
+        return None
+    if manifest.checkpoint_root is None or batch.seed is None:
+        raise RuntimeError("v2 campaign lacks checkpoint or seed identity")
+    build = _load_campaign_build_payload(Path(manifest.build_manifest_path))
+    if str(build["build_id"]) != manifest.build_id:
+        raise RuntimeError("campaign and Production Build identities differ")
+    feature_names = tuple(
+        str(name)
+        for name in cast(tuple[object, ...], manifest.common_config["feature_names"])
+    )
+    config = AdvancedResearchConfig.model_validate(
+        {
+            **{
+                key: value
+                for key, value in manifest.common_config.items()
+                if key != "feature_names"
+            },
+            "horizons": (batch.horizon,),
+            "model_families": (batch.model_family,),
+            "seeds": (batch.seed,),
+        }
+    )
+    provenance: Mapping[str, object] = {
+        "data_snapshot_id": str(build["dataset_snapshot_id"]),
+        "feature_snapshot_id": str(build["v2_snapshot_id"]),
+        "feature_manifest_hash": V2_EXTENDED_MANIFEST.manifest_hash,
+        "feature_names": list(feature_names),
+        "code_commit": manifest.code_commit,
+        "config": config.model_dump(mode="json"),
+        "config_hash": config.config_hash,
+        "locked_holdout_accessed": False,
+    }
+    checkpoint_id = checkpoint_id_for_provenance(provenance)
+    return Path(manifest.checkpoint_root).resolve() / checkpoint_id
+
+
+def read_campaign_status(manifest_path: Path) -> dict[str, object]:
+    """Read batch and granular fold state once without reconciling or mutating it."""
+
+    manifest = load_campaign_manifest(manifest_path.resolve())
+    batches: list[dict[str, object]] = []
+    for batch in manifest.batches:
+        worker_alive = bool(
+            batch.status is CampaignBatchStatus.RUNNING
+            and batch.child_pid is not None
+            and _process_is_running(batch.child_pid)
+        )
+        effective_status = batch.status.value
+        if batch.status is CampaignBatchStatus.RUNNING and not worker_alive:
+            effective_status = CampaignBatchStatus.INTERRUPTED.value
+        checkpoint_path = campaign_batch_checkpoint_path(manifest, batch)
+        checkpoint_summary: dict[str, object] | None = None
+        if checkpoint_path is not None and checkpoint_path.is_dir():
+            checkpoint = read_checkpoint_status(checkpoint_path)
+            units = cast(dict[str, dict[str, Any]], checkpoint["units"])
+            latest = max(
+                units.values(),
+                key=lambda item: str(item.get("updated_at", "")),
+                default=None,
+            )
+            active_units = tuple(
+                value
+                for value in units.values()
+                if value.get("status") == "RUNNING"
+            )
+            current = max(
+                active_units or tuple(units.values()),
+                key=lambda item: str(item.get("updated_at", "")),
+                default=None,
+            )
+            checkpoint_summary = {
+                "checkpoint_id": checkpoint["checkpoint_id"],
+                "updated_at": checkpoint["updated_at"],
+                "unit_counts": checkpoint["unit_counts"],
+                "active_units": active_units,
+                "current_unit": current,
+                "latest_unit": latest,
+            }
+        batches.append(
+            {
+                "batch_id": batch.batch_id,
+                "horizon": batch.horizon,
+                "model_family": batch.model_family,
+                "seed": batch.seed,
+                "stored_status": batch.status.value,
+                "effective_status": effective_status,
+                "attempts": batch.attempts,
+                "worker_alive": worker_alive,
+                "report_id": batch.report_id,
+                "checkpoint": checkpoint_summary,
+            }
+        )
+    current_batch = next(
+        (
+            item
+            for item in batches
+            if item["effective_status"] == CampaignBatchStatus.RUNNING.value
+        ),
+        next(
+            (
+                item
+                for item in batches
+                if item["effective_status"] != CampaignBatchStatus.SUCCEEDED.value
+            ),
+            None,
+        ),
+    )
+    return {
+        "schema_version": "research-campaign-status-v2",
+        "checked_at": datetime.now(UTC).isoformat(),
+        "campaign_id": manifest.campaign_id,
+        "manifest": str(manifest_path.resolve()),
+        "locked_holdout_accessed": False,
+        "current_batch": current_batch,
+        "batches": tuple(batches),
+    }
 
 
 def authenticate_batch_artifact(

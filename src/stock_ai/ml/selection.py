@@ -140,6 +140,99 @@ class FeatureFamilySelection(BaseModel):
         return self
 
 
+class HorizonFeatureSelection(BaseModel):
+    """The exact tuning-only feature decision needed to launch final candidates."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    horizon: int
+    feature_names: tuple[str, ...]
+    feature_names_hash: str = Field(min_length=64, max_length=64)
+    feature_families: tuple[FeatureFamilySelection, ...]
+
+    @model_validator(mode="after")
+    def coherent_feature_selection(self) -> Self:
+        if self.horizon not in HORIZONS:
+            raise ValueError("feature-selection horizon must be 1, 5, or 20")
+        if not self.feature_names or _stable_hash(self.feature_names) != self.feature_names_hash:
+            raise ValueError("feature-selection feature identity mismatch")
+        if len(self.feature_names) != len(set(self.feature_names)):
+            raise ValueError("feature-selection features must be unique")
+        expected_family_ids = tuple(f"F{number}" for number in range(1, 13))
+        if tuple(item.family_id for item in self.feature_families) != expected_family_ids:
+            raise ValueError("feature-selection evidence must contain ordered F1..F12")
+        if any(item.horizon != self.horizon for item in self.feature_families):
+            raise ValueError("feature-selection family horizon mismatch")
+        selected_names = set(V0_MANIFEST.feature_names)
+        for family in self.feature_families:
+            if family.selected:
+                selected_names.update(family.selected_features)
+        expected_features = tuple(
+            name for name in V2_EXTENDED_MANIFEST.feature_names if name in selected_names
+        )
+        if self.feature_names != expected_features:
+            raise ValueError("feature-selection names do not match the frozen family votes")
+        return self
+
+
+class DevelopmentFeatureSelectionArtifact(BaseModel):
+    """Content-addressed bridge from completed ablations to candidate campaigns."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    schema_version: Literal["goal3-development-feature-selection-v1"] = (
+        "goal3-development-feature-selection-v1"
+    )
+    feature_selection_id: str = Field(min_length=64, max_length=64)
+    created_at: datetime
+    build_id: str = Field(min_length=64, max_length=64)
+    data_snapshot_id: str = Field(min_length=64, max_length=64)
+    feature_snapshot_id: str = Field(min_length=64, max_length=64)
+    feature_manifest_hash: str = Field(min_length=64, max_length=64)
+    ablation_campaign_ids: tuple[str, ...]
+    source_report_ids: tuple[str, ...]
+    source_code_commits: tuple[str, ...]
+    seeds: tuple[int, ...]
+    holdout_periods: int = Field(ge=1)
+    locked_holdout_start: str
+    locked_holdout_accessed: Literal[False] = False
+    selection_basis: Literal["ablation_tuning_period_seed_vote_only"] = (
+        "ablation_tuning_period_seed_vote_only"
+    )
+    horizons: tuple[HorizonFeatureSelection, ...]
+    adoption_eligible: Literal[False] = False
+
+    @field_validator("created_at")
+    @classmethod
+    def aware_created_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("feature selection created_at must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def coherent_artifact(self) -> Self:
+        if tuple(item.horizon for item in self.horizons) != HORIZONS:
+            raise ValueError("feature selection requires ordered 1d/5d/20d horizons")
+        if len(self.seeds) < 3 or len(self.seeds) != len(set(self.seeds)):
+            raise ValueError("feature selection requires at least three unique seeds")
+        if any(
+            family.seeds != self.seeds
+            for horizon in self.horizons
+            for family in horizon.feature_families
+        ):
+            raise ValueError("feature selection horizons must use the same frozen seeds")
+        for label, identities in (
+            ("ablation campaign", self.ablation_campaign_ids),
+            ("source report", self.source_report_ids),
+            ("source code commit", self.source_code_commits),
+        ):
+            if not identities or len(identities) != len(set(identities)):
+                raise ValueError(f"feature selection {label} identities must be unique")
+        if self.feature_selection_id != _stable_hash(_feature_selection_identity(self)):
+            raise ValueError("feature selection content identity mismatch")
+        return self
+
+
 class HorizonDevelopmentSelection(BaseModel):
     """Every frozen choice needed for one prediction horizon."""
 
@@ -277,15 +370,131 @@ class _AuthenticatedRun:
 
 @dataclass(frozen=True)
 class _FeatureVoteEvidence:
+    build_id: str
     campaign_ids: tuple[str, ...]
     report_ids: tuple[str, ...]
     code_commits: tuple[str, ...]
     data_snapshot_id: str
     feature_snapshot_id: str
     feature_manifest_hash: str
+    holdout_periods: int
     locked_holdout_start: str
     by_horizon: Mapping[int, tuple[FeatureFamilySelection, ...]]
     feature_names_by_horizon: Mapping[int, tuple[str, ...]]
+
+
+def freeze_development_features(
+    *,
+    ablation_campaign_paths: Sequence[Path],
+    created_at: datetime | None = None,
+) -> DevelopmentFeatureSelectionArtifact:
+    """Freeze tuning-only feature votes before any final-candidate campaign starts."""
+
+    if not ablation_campaign_paths:
+        raise ValueError("feature selection requires completed ablation campaigns")
+    runs = _load_completed_campaigns(ablation_campaign_paths, require_ablations=True)
+    evidence = _derive_feature_votes(runs)
+    seeds = tuple(
+        sorted(
+            {
+                seed
+                for families in evidence.by_horizon.values()
+                for item in families
+                for seed in item.seeds
+            }
+        )
+    )
+    values: dict[str, object] = {
+        "schema_version": "goal3-development-feature-selection-v1",
+        "feature_selection_id": "0" * 64,
+        "created_at": created_at or datetime.now(UTC),
+        "build_id": evidence.build_id,
+        "data_snapshot_id": evidence.data_snapshot_id,
+        "feature_snapshot_id": evidence.feature_snapshot_id,
+        "feature_manifest_hash": evidence.feature_manifest_hash,
+        "ablation_campaign_ids": evidence.campaign_ids,
+        "source_report_ids": evidence.report_ids,
+        "source_code_commits": evidence.code_commits,
+        "seeds": seeds,
+        "holdout_periods": evidence.holdout_periods,
+        "locked_holdout_start": evidence.locked_holdout_start,
+        "locked_holdout_accessed": False,
+        "selection_basis": "ablation_tuning_period_seed_vote_only",
+        "horizons": tuple(
+            HorizonFeatureSelection(
+                horizon=horizon,
+                feature_names=evidence.feature_names_by_horizon[horizon],
+                feature_names_hash=_stable_hash(evidence.feature_names_by_horizon[horizon]),
+                feature_families=evidence.by_horizon[horizon],
+            )
+            for horizon in HORIZONS
+        ),
+        "adoption_eligible": False,
+    }
+    provisional = DevelopmentFeatureSelectionArtifact.model_construct(**cast(Any, values))
+    values["feature_selection_id"] = _stable_hash(
+        _feature_selection_identity(provisional)
+    )
+    return DevelopmentFeatureSelectionArtifact.model_validate(values)
+
+
+def write_development_feature_selection(
+    artifact: DevelopmentFeatureSelectionArtifact,
+    destination: Path,
+) -> Path:
+    """Publish one immutable feature decision for downstream candidate campaigns."""
+
+    if artifact.feature_selection_id != _stable_hash(_feature_selection_identity(artifact)):
+        raise RuntimeError("feature selection content identity mismatch")
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    final_directory = destination / artifact.feature_selection_id
+    final_path = final_directory / f"{artifact.feature_selection_id}.json"
+    payload: dict[str, object] = {"feature_selection": artifact.model_dump(mode="json")}
+    payload["feature_selection_path"] = str(final_path)
+    payload["metadata_hash"] = _stable_hash(payload)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    if final_directory.exists():
+        observed = load_development_feature_selection(final_path)
+        if observed.feature_selection_id != artifact.feature_selection_id:
+            raise RuntimeError("feature selection identity already exists with conflicts")
+        return final_path
+    temporary = Path(tempfile.mkdtemp(prefix=".feature-selection-", dir=destination))
+    try:
+        temporary_path = temporary / final_path.name
+        with temporary_path.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, final_directory)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return final_path
+
+
+def load_development_feature_selection(path: Path) -> DevelopmentFeatureSelectionArtifact:
+    """Authenticate the feature decision before planning candidate campaigns."""
+
+    path = path.resolve()
+    feature_selection_id = path.name.removesuffix(".json")
+    if path.parent.name != feature_selection_id:
+        raise RuntimeError("feature selection path is not content-addressed")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise RuntimeError("feature selection metadata is missing or invalid") from None
+    if not isinstance(payload, dict) or not isinstance(payload.get("feature_selection"), dict):
+        raise RuntimeError("feature selection metadata is invalid")
+    authenticated = {key: value for key, value in payload.items() if key != "metadata_hash"}
+    if payload.get("metadata_hash") != _stable_hash(authenticated):
+        raise RuntimeError("feature selection metadata hash mismatch")
+    if Path(str(payload.get("feature_selection_path", ""))).resolve() != path:
+        raise RuntimeError("feature selection path metadata mismatch")
+    artifact = DevelopmentFeatureSelectionArtifact.model_validate(payload["feature_selection"])
+    if artifact.feature_selection_id != feature_selection_id:
+        raise RuntimeError("feature selection directory identity mismatch")
+    return artifact
 
 
 def freeze_development_selection(
@@ -302,15 +511,53 @@ def freeze_development_selection(
     feature_votes = _derive_feature_votes(ablation_runs)
     del ablation_runs
     candidate_runs = _load_completed_campaigns(candidate_campaign_paths, require_ablations=False)
+    return _freeze_development_selection_from_evidence(
+        feature_votes,
+        candidate_runs,
+        created_at=created_at,
+    )
+
+
+def freeze_development_selection_from_features(
+    *,
+    feature_selection_path: Path,
+    candidate_campaign_paths: Sequence[Path],
+    created_at: datetime | None = None,
+) -> DevelopmentSelectionArtifact:
+    """Finalize all choices from a previously frozen feature decision."""
+
+    if not candidate_campaign_paths:
+        raise ValueError("selection requires final-candidate campaigns")
+    feature_selection = load_development_feature_selection(feature_selection_path)
+    feature_votes = _feature_vote_evidence_from_artifact(feature_selection)
+    candidate_runs = _load_completed_campaigns(candidate_campaign_paths, require_ablations=False)
+    return _freeze_development_selection_from_evidence(
+        feature_votes,
+        candidate_runs,
+        created_at=created_at,
+    )
+
+
+def _freeze_development_selection_from_evidence(
+    feature_votes: _FeatureVoteEvidence,
+    candidate_runs: Sequence[_AuthenticatedRun],
+    *,
+    created_at: datetime | None,
+) -> DevelopmentSelectionArtifact:
     _require_candidate_matrix(candidate_runs)
     build_ids = {run.build_id for run in candidate_runs}
     if len(build_ids) != 1:
         raise ValueError("candidate campaigns must use one Production Build")
     build_id = next(iter(build_ids))
-    if any(run.build_id != build_id for run in _load_campaign_headers(ablation_campaign_paths)):
+    if feature_votes.build_id != build_id:
         raise ValueError("ablation and candidate campaigns must use one Production Build")
     seeds = tuple(sorted({cast(int, run.batch.seed) for run in candidate_runs}))
     reference = candidate_runs[0].report
+    candidate_holdout_periods = {
+        run.report.config.holdout_periods for run in candidate_runs
+    }
+    if candidate_holdout_periods != {feature_votes.holdout_periods}:
+        raise ValueError("ablation and candidate evidence use different holdout periods")
     if (
         feature_votes.data_snapshot_id != reference.data_snapshot_id
         or feature_votes.feature_snapshot_id != reference.feature_snapshot_id
@@ -517,6 +764,9 @@ def _derive_feature_votes(runs: Sequence[_AuthenticatedRun]) -> _FeatureVoteEvid
     if len(build_ids) != 1:
         raise ValueError("ablation campaigns must use one Production Build")
     reference = runs[0].report
+    holdout_periods = {run.report.config.holdout_periods for run in runs}
+    if len(holdout_periods) != 1:
+        raise ValueError("ablation reports do not share one locked holdout period")
     for run in runs:
         if (
             run.report.data_snapshot_id != reference.data_snapshot_id
@@ -592,15 +842,39 @@ def _derive_feature_votes(runs: Sequence[_AuthenticatedRun]) -> _FeatureVoteEvid
         by_horizon[horizon] = tuple(selections)
         features_by_horizon[horizon] = ordered
     return _FeatureVoteEvidence(
+        build_id=next(iter(build_ids)),
         campaign_ids=tuple(sorted({run.campaign_id for run in runs})),
         report_ids=tuple(sorted(run.report.report_id for run in runs)),
         code_commits=tuple(sorted({run.report.code_commit for run in runs})),
         data_snapshot_id=reference.data_snapshot_id,
         feature_snapshot_id=reference.feature_snapshot_id,
         feature_manifest_hash=reference.feature_manifest_hash,
+        holdout_periods=next(iter(holdout_periods)),
         locked_holdout_start=reference.locked_holdout_start,
         by_horizon=MappingProxyType(by_horizon),
         feature_names_by_horizon=MappingProxyType(features_by_horizon),
+    )
+
+
+def _feature_vote_evidence_from_artifact(
+    artifact: DevelopmentFeatureSelectionArtifact,
+) -> _FeatureVoteEvidence:
+    return _FeatureVoteEvidence(
+        build_id=artifact.build_id,
+        campaign_ids=artifact.ablation_campaign_ids,
+        report_ids=artifact.source_report_ids,
+        code_commits=artifact.source_code_commits,
+        data_snapshot_id=artifact.data_snapshot_id,
+        feature_snapshot_id=artifact.feature_snapshot_id,
+        feature_manifest_hash=artifact.feature_manifest_hash,
+        holdout_periods=artifact.holdout_periods,
+        locked_holdout_start=artifact.locked_holdout_start,
+        by_horizon=MappingProxyType(
+            {item.horizon: item.feature_families for item in artifact.horizons}
+        ),
+        feature_names_by_horizon=MappingProxyType(
+            {item.horizon: item.feature_names for item in artifact.horizons}
+        ),
     )
 
 
@@ -990,6 +1264,15 @@ def _finite_correlation(left: np.ndarray, right: np.ndarray) -> float | None:
 
 def _selection_identity(artifact: DevelopmentSelectionArtifact) -> dict[str, object]:
     return artifact.model_dump(mode="json", exclude={"selection_id", "created_at"})
+
+
+def _feature_selection_identity(
+    artifact: DevelopmentFeatureSelectionArtifact,
+) -> dict[str, object]:
+    return artifact.model_dump(
+        mode="json",
+        exclude={"feature_selection_id", "created_at"},
+    )
 
 
 def _stable_hash(value: object) -> str:

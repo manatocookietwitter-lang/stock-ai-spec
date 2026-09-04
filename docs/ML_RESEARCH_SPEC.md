@@ -408,6 +408,7 @@ rejection reason
 ## 7.3 Development選択の固定とlocked holdout単回評価
 
 - feature familyはablation campaignのstrictly-earlier tuning evidenceをseedごとに集約し、3 seed以上のうち3分の2以上が支持したものだけをhorizon別に固定する
+- vote結果はfinal-candidate開始前に、Production Build / Dataset / Feature / code / seed / holdout境界とexact feature列を持つcontent-addressed中間artifactへ固定する
 - final-candidate campaignは固定済みfeature列だけで、LightGBM / XGBoost / CatBoost、1 / 5 / 20日、3 seed以上、regression / ranking / quantile / large-lossを完走する
 - model、feature、hyperparameter、ensemble weight、uncertaintyの選択はpurged development OOFだけで完了し、一つのcontent-addressed selection artifactとして保存する
 - 選択artifactはProduction Build、Dataset / Feature snapshot、feature definition、campaign / report / code identity、holdout境界を認証し、`locked_holdout_accessed=false`を固定する

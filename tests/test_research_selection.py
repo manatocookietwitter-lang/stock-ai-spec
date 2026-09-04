@@ -31,8 +31,12 @@ from stock_ai.ml.campaign import (
     write_campaign_manifest,
 )
 from stock_ai.ml.selection import (
+    freeze_development_features,
     freeze_development_selection,
+    freeze_development_selection_from_features,
+    load_development_feature_selection,
     load_development_selection,
+    write_development_feature_selection,
     write_development_selection,
 )
 
@@ -41,11 +45,12 @@ def test_complete_development_selection_is_content_addressed_and_holdout_closed(
     tmp_path: Path,
 ) -> None:
     ablation_path, candidate_path = _campaign_fixtures(tmp_path)
+    frozen_at = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 
     selection = freeze_development_selection(
         ablation_campaign_paths=(ablation_path,),
         candidate_campaign_paths=(candidate_path,),
-        created_at=datetime(2026, 9, 4, 12, 0, tzinfo=UTC),
+        created_at=frozen_at,
     )
 
     assert selection.locked_holdout_accessed is False
@@ -71,6 +76,32 @@ def test_complete_development_selection_is_content_addressed_and_holdout_closed(
     path = write_development_selection(selection, tmp_path / "selections")
     assert load_development_selection(path) == selection
     assert write_development_selection(selection, tmp_path / "selections") == path
+
+    feature_selection = freeze_development_features(
+        ablation_campaign_paths=(ablation_path,),
+        created_at=datetime(2026, 9, 4, 11, 0, tzinfo=UTC),
+    )
+    assert not feature_selection.locked_holdout_accessed
+    assert tuple(item.horizon for item in feature_selection.horizons) == (1, 5, 20)
+    assert all(item.feature_names == expected_features for item in feature_selection.horizons)
+    feature_path = write_development_feature_selection(
+        feature_selection,
+        tmp_path / "feature-selections",
+    )
+    assert load_development_feature_selection(feature_path) == feature_selection
+    assert (
+        write_development_feature_selection(
+            feature_selection,
+            tmp_path / "feature-selections",
+        )
+        == feature_path
+    )
+    finalized = freeze_development_selection_from_features(
+        feature_selection_path=feature_path,
+        candidate_campaign_paths=(candidate_path,),
+        created_at=frozen_at,
+    )
+    assert finalized == selection
 
     candidate_manifest = load_campaign_manifest(candidate_path)
     candidate_oof_path = candidate_manifest.batches[0].oof_path

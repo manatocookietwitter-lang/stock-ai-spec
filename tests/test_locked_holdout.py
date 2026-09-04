@@ -37,10 +37,12 @@ from stock_ai.ml.holdout import (
 )
 from stock_ai.ml.production import write_production_dataset_snapshot
 from stock_ai.ml.selection import (
+    DevelopmentFeatureSelectionArtifact,
     DevelopmentSelectionArtifact,
     FeatureFamilySelection,
     FrozenModelComponent,
     HorizonDevelopmentSelection,
+    HorizonFeatureSelection,
     write_development_selection,
 )
 
@@ -328,6 +330,82 @@ def test_selection_artifact_schema_requires_complete_unique_provenance() -> None
         with pytest.raises(ValueError, match=message):
             DevelopmentSelectionArtifact.model_validate(
                 {**selection.model_dump(mode="python"), **updates}
+            )
+
+
+def test_feature_selection_schema_requires_exact_votes_and_shared_seeds() -> None:
+    selection = _selection_fixture(build_id="a" * 64, dataset_id="b" * 64)
+    artifact = _feature_selection_fixture(selection)
+    horizon = artifact.horizons[0]
+    horizon_five = artifact.horizons[1]
+    duplicate_features = (horizon.feature_names[0], horizon.feature_names[0])
+    cases: tuple[tuple[dict[str, object], str], ...] = (
+        ({"horizon": 2}, "must be 1, 5, or 20"),
+        ({"feature_names_hash": "f" * 64}, "feature identity"),
+        (
+            {
+                "feature_names": duplicate_features,
+                "feature_names_hash": selection_module._stable_hash(duplicate_features),
+            },
+            "features must be unique",
+        ),
+        ({"feature_families": horizon.feature_families[:-1]}, "ordered F1..F12"),
+        (
+            {
+                "feature_families": (
+                    horizon_five.feature_families[0],
+                    *horizon.feature_families[1:],
+                )
+            },
+            "family horizon mismatch",
+        ),
+        (
+            {
+                "feature_names": horizon.feature_names[:-1],
+                "feature_names_hash": selection_module._stable_hash(
+                    horizon.feature_names[:-1]
+                ),
+            },
+            "do not match the frozen family votes",
+        ),
+    )
+    for updates, message in cases:
+        with pytest.raises(ValueError, match=message):
+            HorizonFeatureSelection.model_validate(
+                {**horizon.model_dump(mode="python"), **updates}
+            )
+
+    different_seed_family = FeatureFamilySelection.model_validate(
+        {
+            **horizon.feature_families[0].model_dump(mode="python"),
+            "seeds": (17, 29, 47),
+        }
+    )
+    different_seed_horizon = horizon.model_copy(
+        update={
+            "feature_families": (
+                different_seed_family,
+                *horizon.feature_families[1:],
+            )
+        }
+    )
+    artifact_cases: tuple[tuple[dict[str, object], str], ...] = (
+        ({"created_at": datetime(2026, 1, 2)}, "timezone-aware"),
+        ({"horizons": artifact.horizons[:-1]}, "ordered 1d/5d/20d"),
+        ({"seeds": (17, 29)}, "at least three"),
+        (
+            {"horizons": (different_seed_horizon, *artifact.horizons[1:])},
+            "same frozen seeds",
+        ),
+        ({"ablation_campaign_ids": ()}, "ablation campaign identities"),
+        ({"source_report_ids": ()}, "source report identities"),
+        ({"source_code_commits": ()}, "source code commit identities"),
+        ({"feature_selection_id": "f" * 64}, "content identity"),
+    )
+    for updates, message in artifact_cases:
+        with pytest.raises(ValueError, match=message):
+            DevelopmentFeatureSelectionArtifact.model_validate(
+                {**artifact.model_dump(mode="python"), **updates}
             )
 
 
@@ -679,6 +757,7 @@ def test_selection_and_holdout_cli_publish_auditable_results(
     )
     ledger = _ledger_fixture(selection, checkpoint)
     report = _report_fixture(selection, ledger, component)
+    feature_selection = _feature_selection_fixture(selection)
     ablation_path = tmp_path / "ablation.json"
     candidate_path = tmp_path / "candidate.json"
     build_path = tmp_path / "build.json"
@@ -688,6 +767,114 @@ def test_selection_and_holdout_cli_publish_auditable_results(
     selection_path.write_text("{}", encoding="utf-8")
     report_path = tmp_path / "report.json"
     runner = CliRunner()
+
+    monkeypatch.setattr(cli_module, "freeze_development_features", lambda **_: feature_selection)
+    monkeypatch.setattr(
+        cli_module,
+        "write_development_feature_selection",
+        lambda *_: selection_path,
+    )
+    frozen_features = runner.invoke(
+        app,
+        [
+            "research",
+            "freeze-features",
+            "--ablation-campaign",
+            str(ablation_path),
+            "--feature-selection-root",
+            str(tmp_path / "feature-selections"),
+            "--experiment-registry",
+            str(tmp_path / "feature-experiments.jsonl"),
+        ],
+    )
+    assert frozen_features.exit_code == 0, frozen_features.output
+    assert "feature_choices_complete=true" in frozen_features.output
+    assert "holdout_accessed=false" in frozen_features.output
+
+    candidate_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli_module,
+        "load_development_feature_selection",
+        lambda _: feature_selection,
+    )
+    monkeypatch.setattr(cli_module, "load_campaign_build_id", lambda _: selection.build_id)
+    monkeypatch.setattr(
+        cli_module,
+        "research_campaign",
+        lambda **kwargs: candidate_calls.append(kwargs),
+    )
+    candidates = runner.invoke(
+        app,
+        [
+            "research",
+            "candidate-campaigns",
+            "--feature-selection",
+            str(selection_path),
+            "--build-manifest",
+            str(build_path),
+            "--code-commit",
+            "candidate-test",
+            "--holdout-periods",
+            str(feature_selection.holdout_periods),
+            "--campaign-root",
+            str(tmp_path / "candidate-campaigns"),
+        ],
+    )
+    assert candidates.exit_code == 0, candidates.output
+    assert len(candidate_calls) == 3
+    assert [call["horizons"] for call in candidate_calls] == ["1", "5", "20"]
+    assert all(call["seeds"] == "17,29,43" for call in candidate_calls)
+    assert all(call["run_ablations"] is False for call in candidate_calls)
+    assert [
+        tuple(str(call["feature_names"]).split(",")) for call in candidate_calls
+    ] == [horizon.feature_names for horizon in feature_selection.horizons]
+    campaign_root = tmp_path / "candidate-status"
+    h1_manifest = campaign_root / feature_selection.feature_selection_id / "h1.json"
+    h1_manifest.parent.mkdir(parents=True)
+    h1_manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        cli_module,
+        "read_campaign_status",
+        lambda path: {"manifest": str(path), "current_batch": {"seed": 17}},
+    )
+    candidate_status = runner.invoke(
+        app,
+        [
+            "research",
+            "candidate-status",
+            "--feature-selection",
+            str(selection_path),
+            "--campaign-root",
+            str(campaign_root),
+        ],
+    )
+    assert candidate_status.exit_code == 0, candidate_status.output
+    candidate_status_payload = json.loads(candidate_status.stdout)
+    assert candidate_status_payload["locked_holdout_accessed"] is False
+    assert candidate_status_payload["horizons"][0]["campaign"]["current_batch"] == {
+        "seed": 17
+    }
+    assert [item["status"] for item in candidate_status_payload["horizons"][1:]] == [
+        "NOT_STARTED",
+        "NOT_STARTED",
+    ]
+    blocked_candidates = runner.invoke(
+        app,
+        [
+            "research",
+            "candidate-campaigns",
+            "--feature-selection",
+            str(selection_path),
+            "--build-manifest",
+            str(build_path),
+            "--code-commit",
+            "candidate-test",
+            "--seeds",
+            "17,29",
+        ],
+    )
+    assert blocked_candidates.exit_code == 2
+    assert "at least three unique seeds" in blocked_candidates.output
 
     monkeypatch.setattr(cli_module, "freeze_development_selection", lambda **_: selection)
     monkeypatch.setattr(cli_module, "write_development_selection", lambda *_: selection_path)
@@ -728,6 +915,29 @@ def test_selection_and_holdout_cli_publish_auditable_results(
     )
     assert blocked_selection.exit_code == 2
     assert "development selection blocked" in blocked_selection.output
+
+    monkeypatch.setattr(
+        cli_module,
+        "freeze_development_selection_from_features",
+        lambda **_: selection,
+    )
+    finalized = runner.invoke(
+        app,
+        [
+            "research",
+            "finalize-selection",
+            "--feature-selection",
+            str(selection_path),
+            "--candidate-campaign",
+            str(candidate_path),
+            "--selection-root",
+            str(tmp_path / "selections-final"),
+            "--experiment-registry",
+            str(tmp_path / "final-selection-experiments.jsonl"),
+        ],
+    )
+    assert finalized.exit_code == 0, finalized.output
+    assert "choices_complete=true" in finalized.output
 
     monkeypatch.setattr(
         cli_module,
@@ -800,6 +1010,42 @@ def test_selection_and_holdout_cli_publish_auditable_results(
     assert '"status": "RUNNING"' in status.output
 
 
+def _feature_selection_fixture(
+    selection: DevelopmentSelectionArtifact,
+) -> DevelopmentFeatureSelectionArtifact:
+    values: dict[str, object] = {
+        "feature_selection_id": "0" * 64,
+        "created_at": datetime(2026, 1, 2, tzinfo=UTC),
+        "build_id": selection.build_id,
+        "data_snapshot_id": selection.data_snapshot_id,
+        "feature_snapshot_id": selection.feature_snapshot_id,
+        "feature_manifest_hash": selection.feature_manifest_hash,
+        "ablation_campaign_ids": selection.ablation_campaign_ids,
+        "source_report_ids": selection.source_report_ids,
+        "source_code_commits": selection.source_code_commits,
+        "seeds": selection.seeds,
+        "holdout_periods": (
+            selection.horizons[0].expected_return_component.source_config.holdout_periods
+        ),
+        "locked_holdout_start": selection.locked_holdout_start,
+        "horizons": tuple(
+            HorizonFeatureSelection(
+                horizon=horizon.horizon,
+                feature_names=horizon.feature_names,
+                feature_names_hash=horizon.feature_names_hash,
+                feature_families=horizon.feature_families,
+            )
+            for horizon in selection.horizons
+        ),
+        "adoption_eligible": False,
+    }
+    provisional = DevelopmentFeatureSelectionArtifact.model_construct(**values)
+    values["feature_selection_id"] = selection_module._stable_hash(
+        selection_module._feature_selection_identity(provisional)
+    )
+    return DevelopmentFeatureSelectionArtifact.model_validate(values)
+
+
 def _ledger_fixture(
     selection: DevelopmentSelectionArtifact,
     checkpoint: HoldoutComponentCheckpoint,
@@ -867,7 +1113,7 @@ def _report_fixture(
 def _production_fixture(tmp_path: Path) -> tuple[Path, str, str]:
     dates = pd.date_range("2025-01-06", periods=50, freq="B")
     rows: list[dict[str, object]] = []
-    feature_names = V0_MANIFEST.feature_names[:2]
+    feature_names = V0_MANIFEST.feature_names
     for date_index, trading_date in enumerate(dates):
         for symbol_index, symbol in enumerate(("A", "B", "C")):
             row: dict[str, object] = {
@@ -877,9 +1123,11 @@ def _production_fixture(tmp_path: Path) -> tuple[Path, str, str]:
                 + timedelta(hours=11, minutes=30),
                 "historical_revision_policy": "SINGLE_VINTAGE_AS_REVISED",
                 "historical_revision_status": CapabilityStatus.PARTIAL.value,
-                feature_names[0]: float(date_index + symbol_index),
-                feature_names[1]: float((date_index + 1) * (symbol_index + 1)),
             }
+            for feature_index, feature_name in enumerate(feature_names):
+                row[feature_name] = float(
+                    (date_index + 1) * (symbol_index + 1) + feature_index
+                )
             for horizon in (1, 5, 20):
                 target = (symbol_index - 1) * 0.01 + date_index * 0.0001
                 endpoint = trading_date + timedelta(days=horizon + 1)
@@ -947,7 +1195,7 @@ def _production_fixture(tmp_path: Path) -> tuple[Path, str, str]:
 
 
 def _selection_fixture(*, build_id: str, dataset_id: str) -> DevelopmentSelectionArtifact:
-    feature_names = V0_MANIFEST.feature_names[:2]
+    feature_names = V0_MANIFEST.feature_names
     horizons: list[HorizonDevelopmentSelection] = []
     report_ids: list[str] = []
     for horizon in (1, 5, 20):

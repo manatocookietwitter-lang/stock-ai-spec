@@ -33,6 +33,14 @@ def stable_hash(value: object) -> str:
     ).hexdigest()
 
 
+def checkpoint_id_for_provenance(provenance: Mapping[str, object]) -> str:
+    """Derive the exact content-addressed checkpoint namespace without creating it."""
+
+    return stable_hash(
+        {"schema_version": _CHECKPOINT_SCHEMA, "provenance": dict(provenance)}
+    )
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -135,9 +143,7 @@ class ResearchCheckpointStore:
 
     def __init__(self, root: Path, *, provenance: Mapping[str, object]) -> None:
         self.provenance = dict(provenance)
-        self.checkpoint_id = stable_hash(
-            {"schema_version": _CHECKPOINT_SCHEMA, "provenance": self.provenance}
-        )
+        self.checkpoint_id = checkpoint_id_for_provenance(self.provenance)
         self.path = root.resolve() / self.checkpoint_id
         self.path.mkdir(parents=True, exist_ok=True)
         self._lock = _ExclusiveLock(self.path / "writer.lock")

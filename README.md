@@ -175,19 +175,40 @@ uncertainty calibrationを実装した。hyperparameter選択はstrictly earlier
 stacking・uncertainty calibration・reported coverageはさらに3つの時系列区間へ分離する。
 locked final holdoutは開かない。`research advanced`の成果物は常にresearch-onlyで、実注文を生成しない。
 
-ablation campaignと、その投票で固定したfeature subsetによるfinal-candidate campaignがすべて成功した後だけ、
-development OOFから全選択をcontent-addressed artifactへ固定する。
+Production workflowはablation完了時点でtuning-onlyのfeature voteを先にcontent-addressed
+artifactへ固定する。そのartifactだけを入力にhorizon別final-candidate campaignを実行し、すべて成功した後に
+development OOFから残る全選択を固定する。
 
 ```text
-stock-ai research freeze-selection \
+stock-ai research freeze-features \
   --ablation-campaign <completed-v2-ablation-manifest> \
-  --candidate-campaign <completed-v2-final-candidate-manifest>
+  --feature-selection-root artifacts/selections/goal3-features
+stock-ai research candidate-campaigns \
+  --feature-selection <content-addressed-feature-selection.json> \
+  --build-manifest <exact-production-build.json> \
+  --code-commit <exact-candidate-commit>
+stock-ai research finalize-selection \
+  --feature-selection <content-addressed-feature-selection.json> \
+  --candidate-campaign <completed-h1-manifest> \
+  --candidate-campaign <completed-h5-manifest> \
+  --candidate-campaign <completed-h20-manifest>
 ```
 
 この段階で1 / 5 / 20日ごとのfeature family、expected-return / rank / downside / large-loss model、
 全hyperparameter、OOF ensemble weight、uncertainty calibrationが固定され、Experiment Registryには
 `locked_holdout_accessed=false`で記録される。不完全campaign、3 seed未満、snapshot / Build / feature / code不一致、
 holdoutを含むreportは拒否する。
+
+長時間のcandidate処理は`runner/candidate-runner.ps1 -Action run`へ委譲でき、同じfeature selectionと
+campaign manifestからhorizon / model / seed / fold / Optuna trial単位で再開する。Windows再起動後の入口は
+`runner/register-candidate-runner-task.ps1`で明示登録する。進捗確認は次のread-only commandを要求時に1回だけ実行する。
+
+```text
+powershell -NoProfile -File runner/candidate-runner.ps1 -Action status \
+  -FeatureSelection <content-addressed-feature-selection.json> \
+  -BuildManifest <exact-production-build.json> \
+  -CodeCommit <exact-candidate-commit>
+```
 
 locked holdoutは固定後の明示的な単回入口だけで評価する。開始前にselection directoryへ一つの評価ledger pathと
 evaluator commitを不可逆に紐付け、model componentごとのprediction-only checkpointから再開する。別rootや別commitでの

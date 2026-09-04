@@ -718,3 +718,16 @@ resumeする。status入口はread-onlyであり、broker発注や自動売買�
 二回目の整列passは同じParquetのbyte hashとreport identityを読込前後に再認証した上で、regression / rankingに必要な
 6列だけをpredicate付きで読む。quantile / large-loss rowを同時に再materializeせず、行削減や未認証sampleへのfallbackも
 行わない。
+
+### D075 — Feature voteとfinal-candidate研究の間に不変artifactを置く
+
+実データのproduction順序を、`ablation完了 → tuning-only feature vote固定 → final-candidate campaign → 全development選択固定`
+の二段階にする。feature voteはhorizon別のexact feature列、F1〜F12のseed vote、Production Build、Dataset / Feature snapshot、
+manifest、source report / campaign / code、holdout境界をcontent-addressed artifactへ保存し、`locked_holdout_accessed=false`とする。
+final-candidate入口はこのartifactと同じBuild / holdout境界だけを受け入れ、LightGBM / XGBoost / CatBoost、1 / 5 / 20日、
+3 seed以上をhorizon別v2 campaignとして実行する。
+
+candidate runnerはCodexから独立し、horizonを順に進め、各campaign内ではmodel / seedを順に進める。foldとOptuna trialは
+D073の認証済みcheckpointだけを再利用する。statusはfeature selectionに属する全horizon manifestを一度だけreadし、
+保存状態、worker実効状態、horizon / model / seed、activeまたは最新foldを返すだけで、manifest・worker・holdoutを変更しない。
+現行legacy campaignへこのsourceを途中適用せず、安全な完了境界後に新方式へ切り替える。

@@ -1,6 +1,6 @@
 # Project Status
 
-更新日: 2026-09-04
+更新日: 2026-09-05
 状態: `GOAL3_INDEPENDENT_RESEARCH_RUNNING`
 
 ## Goal 1で実装したもの
@@ -533,3 +533,13 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - holdoutの独立runnerとTask Scheduler登録入口を追加した。全development選択固定後の明示登録時だけ単回評価を開始し、Windows再起動後も同じledgerをresumeする。研究workerへAPI keyを渡さず、read-only statusは状態を変更しない
 - fixtureで中断・resume・成功済みcomponent skip・改ざん・alternate root / commit拒否・selection schema不整合を検証した。実データlocked holdoutは未開封で、Champion候補もまだ固定していない
 - 隔離branchの全品質gateはRuff / strict mypy（48 source files）/ Python 229 test / branch coverage 85.33% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がpass。PowerShell 5.1で両holdout runner scriptの構文とTask Scheduler引数表示も検証した
+
+## 2026-09-05 Goal 3 feature固定→candidate実行ブリッジ（隔離ブランチ）
+
+- ablationのtuning-only seed voteを、horizon別exact feature列、F1〜F12 evidence、Build / Dataset / Feature / campaign / report / code / holdout境界とともにcontent-addressed `DevelopmentFeatureSelectionArtifact`へ先に固定する入口を追加した
+- 固定artifactだけから1 / 5 / 20日それぞれのLightGBM / XGBoost / CatBoost × 3 seed以上をv2 campaignとしてrun / resumeし、完了後に全model・parameter・ensemble weight・uncertaintyを固定する二段階CLIを追加した
+- candidate専用の独立runnerとWindows Task Scheduler登録scriptを追加した。Codex終了・Windows再起動後も同じmanifest、fold checkpoint、永続Optuna studyから自動再開し、API keyをworkerへ渡さず、locked holdoutを開かない
+- `research campaign-status` / `candidate-status`はread-onlyで、v2 campaignのhorizon / model / seedに加えactiveまたは最新のtask / foldとcheckpoint件数を返す。status実行前後にcampaign / progress byteが同一であることをfixture testで確認した
+- 独立runnerが実際に使う`python -m stock_ai`入口を追加した。日付切替前後でもGoal 5 E2Eが未来時刻fixtureを作らないよう、APIへaware clock注入口を設け、E2EだけJSTの固定時刻を使用する。production既定は現在JSTのまま、naive clockは拒否する
+- 品質gateはRuff / strict mypy（48 source files）/ Python 233 test / branch coverage 85.29% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がpass。candidate / research / holdout runner全scriptはWindows PowerShell 5.1 parserを通し、candidate Task Schedulerの全研究configを明示引数として表示確認した
+- 現行legacy campaignは変更・停止・再起動しておらず、この隔離sourceはその安全な完了境界後までmainへ取り込まない。実データfeature vote、candidate実行、Champion候補固定、locked holdout単回評価はまだ未実行

@@ -100,12 +100,27 @@ function Get-RunnerStatus([string]$ManifestPath, [bool]$FullArtifactCheck) {
     $payload = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-SourceProvenance $payload
     Invoke-PythonValidation $ManifestPath $FullArtifactCheck
+    $python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
+    $granularJson = @(
+        & $python -m stock_ai research campaign-status --campaign-manifest $ManifestPath
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw 'read-only granular campaign status authentication failed'
+    }
+    $granular = ($granularJson -join [Environment]::NewLine) | ConvertFrom-Json
     $batches = @()
     foreach ($batch in $payload.batches) {
         $workerAlive = Test-WorkerIdentity $batch
         $effective = [string]$batch.status
         if ($effective -eq 'RUNNING' -and -not $workerAlive) {
             $effective = 'INTERRUPTED'
+        }
+        $granularBatch = @($granular.batches | Where-Object {
+            [string]$_.batch_id -eq [string]$batch.batch_id
+        }) | Select-Object -First 1
+        $currentEvidence = $null
+        if ($null -ne $granularBatch -and $null -ne $granularBatch.checkpoint) {
+            $currentEvidence = $granularBatch.checkpoint.current_unit.evidence
         }
         $batches += [pscustomobject]@{
             batch_id = [string]$batch.batch_id
@@ -124,10 +139,13 @@ function Get-RunnerStatus([string]$ManifestPath, [bool]$FullArtifactCheck) {
             worker_alive = $workerAlive
             report_id = $batch.report_id
             last_error = $batch.last_error
+            current_task = $(if ($null -eq $currentEvidence) { $null } else { $currentEvidence.task })
+            current_fold = $(if ($null -eq $currentEvidence) { $null } else { $currentEvidence.fold })
+            checkpoint = $(if ($null -eq $granularBatch) { $null } else { $granularBatch.checkpoint })
         }
     }
     return [pscustomobject]@{
-        schema_version = 'research-runner-status-v1'
+        schema_version = 'research-runner-status-v2'
         checked_at = [DateTimeOffset]::UtcNow.ToString('o')
         campaign_id = [string]$payload.campaign_id
         code_commit = [string]$payload.code_commit
@@ -250,7 +268,7 @@ if ($Action -eq 'status') {
         $status | ConvertTo-Json -Depth 6
     } else {
         "campaign=$($status.campaign_id) validation=$($status.validation) holdout_accessed=false"
-        $status.batches | Format-Table batch_id, seed, stored_status, effective_status, attempts, worker_alive, report_id -AutoSize
+        $status.batches | Format-Table horizon, model_family, seed, current_task, current_fold, stored_status, effective_status, attempts, worker_alive -AutoSize
     }
     exit 0
 }
