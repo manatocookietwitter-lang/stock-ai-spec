@@ -466,19 +466,19 @@ class FoldPreprocessor:
 
     def fit(self, frame: pd.DataFrame) -> FoldPreprocessor:
         numeric = _finite_numeric(frame.loc[:, list(self.feature_names)])
-        lower = numeric.quantile(self.lower_quantile)
-        upper = numeric.quantile(self.upper_quantile)
-        clipped = numeric.clip(lower=lower, upper=upper, axis="columns")
-        median = clipped.median().fillna(0.0)
-        filled = clipped.fillna(median)
+        lower = numeric.quantile(self.lower_quantile).astype(np.float32)
+        upper = numeric.quantile(self.upper_quantile).astype(np.float32)
+        numeric.clip(lower=lower, upper=upper, axis="columns", inplace=True)
+        median = numeric.median().fillna(0.0).astype(np.float32)
+        numeric.fillna(median, inplace=True)
         retained: list[str] = []
         for name in self.feature_names:
-            if filled[name].nunique(dropna=False) <= 1:
+            if numeric[name].nunique(dropna=False) <= 1:
                 continue
             if not retained:
                 retained.append(name)
                 continue
-            correlations = filled.loc[:, retained].corrwith(filled[name]).abs()
+            correlations = numeric.loc[:, retained].corrwith(numeric[name]).abs()
             if correlations.fillna(0.0).max() <= self.correlation_threshold:
                 retained.append(name)
         self._lower = lower
@@ -493,8 +493,12 @@ class FoldPreprocessor:
         if self._lower is None or self._upper is None or self._median is None:
             raise RuntimeError("fold preprocessor must be fitted before transform")
         numeric = _finite_numeric(frame.loc[:, list(self.feature_names)])
-        clipped = numeric.clip(lower=self._lower, upper=self._upper, axis="columns")
-        return clipped.fillna(self._median).loc[:, list(self.retained_features)]
+        numeric.clip(lower=self._lower, upper=self._upper, axis="columns", inplace=True)
+        numeric.fillna(self._median, inplace=True)
+        dropped = [name for name in numeric.columns if name not in self.retained_features]
+        if dropped:
+            numeric.drop(columns=dropped, inplace=True)
+        return numeric
 
 
 def generate_oof_predictions(
@@ -2249,8 +2253,28 @@ def _report_identity(report: AdvancedResearchReport) -> dict[str, object]:
 
 
 def _finite_numeric(frame: pd.DataFrame) -> pd.DataFrame:
-    numeric = frame.apply(pd.to_numeric, errors="coerce").astype(float)
-    return pd.DataFrame(numeric.replace([np.inf, -np.inf], np.nan))
+    """Coerce a wide fold directly into a bounded-memory float32 matrix.
+
+    Building the intermediary with ``DataFrame.astype(float)`` duplicates the complete
+    fold as float64.  A production fold can exceed 2.8 million rows, so that single
+    temporary requires more than 1.6 GiB for V2 before clipping or model fitting begins.
+    Filling one preallocated float32 column at a time preserves the model input semantics
+    while avoiding the full-size float64 intermediary.
+    """
+
+    columns = list(frame.columns)
+    values = np.empty((len(frame), len(columns)), dtype=np.float32)
+    for position, name in enumerate(columns):
+        column = pd.to_numeric(frame[name], errors="coerce").to_numpy(
+            dtype=np.float32,
+            na_value=np.nan,
+        )
+        finite = np.isfinite(column)
+        if not finite.all():
+            column = column.copy()
+            column[~finite] = np.nan
+        values[:, position] = column
+    return pd.DataFrame(values, index=frame.index, columns=columns, copy=False)
 
 
 def _chronological_meta_masks(

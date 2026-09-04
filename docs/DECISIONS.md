@@ -644,3 +644,14 @@ manifestの`SUCCEEDED`表示だけを信用せず、OOF Parquet、metadata hash�
 campaign親はcontent-addressed Build marker自体のidentity / metadata hashだけを軽量認証して、resume manifestを即時公開する。
 各batch childは開始時に従来どおり全feature / Dataset Parquet内容まで完全認証する。これにより長い事前認証中の親停止でも
 campaignの現在地を失わず、Parquet完全性を省略しない。
+
+### D071 — Goal 3のfold前処理はfloat32でメモリ境界を固定する
+
+full JPXの5日LightGBM実runでは、2,826,087行 × 77特徴のfoldを前処理する際、既存frameに加えて
+`float64`全列copyを作成しようとして1.62 GiBの連続領域確保に失敗した。行・期間・特徴を削減するfallbackは行わず、
+有限値正規化は事前確保した`float32`行列へ1列ずつ変換し、training foldだけから求めるclip境界と中央値も
+`float32`へ固定する。clip / fill / 不採用列dropは同じ行列上で行い、不要なwide `float64`中間copyを作らない。
+
+この変更はfeature定義、target、fold境界、purge / embargo、Optuna範囲、model family、locked holdout境界を変えない。
+ただし数値表現は研究codeの一部なので、新しいcode commitとcampaign identityで追跡し、旧codeの成功reportを
+新campaignの成功batchとして偽装しない。OOMを含む失敗experimentと完了済みtrial / fold監査は削除しない。

@@ -102,6 +102,7 @@ def test_fold_preprocessor_is_fit_only_on_training_values() -> None:
 
     pdt.assert_frame_equal(before, after)
     assert "b" not in processor.retained_features
+    assert all(dtype == np.dtype("float32") for dtype in before.dtypes)
 
 
 def test_all_failed_optuna_trials_remain_available_for_failure_audit(

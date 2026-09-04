@@ -493,3 +493,10 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - API keyは不要な研究childの環境から除去し、campaign command / manifest / logへも含めない。campaignとlogはGit対象外、実験結果は既存の認証済みartifact境界とExperiment Registryへ保存する
 - 親processはBuild markerのidentity / metadata hashを軽量認証してmanifestを先に保存し、各batch childが全Parquet内容を実行直前に完全認証する。model開始前の約20分間にresume状態が存在しない実測上の穴を塞いだ
 - 旧runの失敗理由はresource scaleと中断粒度であり、model成績による棄却ではない。development選択は新campaignの完了結果だけから行い、全選択固定までlocked holdoutを開かない
+
+## 2026-09-04 Goal 3 5日foldのメモリ境界修正
+
+- base campaignは1日LightGBM / XGBoost / CatBoostの3 batchを認証済みで完了。5日LightGBM attempt 1はhost process中断でartifact未公開、attempt 2は3 Optuna trialと一部outer foldを完了後、2,826,087行 × 77特徴の`float64`一括copy（1.62 GiB）を確保できず`FAILED`になった
+- attempt 2の失敗、完了trial、生成済みfold監査はExperiment Registryへappend済み。content-addressed成功reportは公開されず、5日XGBoost以降も開始していない。locked final holdoutは引き続き未開封
+- D071として有限値正規化を列単位の事前確保`float32`行列へ変更し、training-only clip / medianも`float32`、clip / fill / dropをin-place化した。行数・特徴数・target・fold・purge / embargo・tuning範囲は削減していない
+- 変更後はAdvanced Research / campaign 44 testをFutureWarningエラー扱いでpass、Ruffとstrict mypy（45 source files）もpass。新code commitを固定した5日 / 20日campaignとして再開し、旧code成功分と新code分のprovenanceを混同しない
