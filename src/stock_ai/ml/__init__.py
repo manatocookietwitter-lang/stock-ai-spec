@@ -18,6 +18,7 @@ from stock_ai.ml.advanced import (
     feature_family_ablation_plan,
     fit_predict_frozen_model,
     load_advanced_research_run,
+    load_authenticated_advanced_oof_slice,
     run_advanced_research,
     write_advanced_research_run,
 )
@@ -155,6 +156,7 @@ __all__ = [
     "freeze_development_selection",
     "infer_current_morning_predictions",
     "load_advanced_research_run",
+    "load_authenticated_advanced_oof_slice",
     "load_development_selection",
     "load_locked_holdout_report",
     "load_morning_dataset_snapshot",

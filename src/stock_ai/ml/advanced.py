@@ -2221,6 +2221,53 @@ def load_advanced_research_run(
 ) -> tuple[AdvancedResearchReport, pd.DataFrame]:
     """Authenticate an advanced report bundle before downstream use."""
 
+    parquet_path, report, parquet_sha256 = _authenticate_advanced_research_bundle(
+        parquet_path
+    )
+    frame = pd.read_parquet(parquet_path)
+    if _file_sha256(parquet_path) != parquet_sha256:
+        raise RuntimeError("advanced research Parquet changed while it was being read")
+    if len(frame) != report.oof_rows or _frame_hash(frame) != report.oof_sha256:
+        raise RuntimeError("advanced research OOF content identity mismatch")
+    return report, frame
+
+
+def load_authenticated_advanced_oof_slice(
+    parquet_path: Path,
+    *,
+    tasks: tuple[ModelTask, ...],
+) -> tuple[AdvancedResearchReport, pd.DataFrame]:
+    """Read selected OOF tasks without materializing unrelated authenticated rows.
+
+    The immutable Parquet byte hash and report identity are authenticated before and after
+    the filtered read. The full logical-frame hash remains verified when a campaign first
+    enters development selection through :func:`load_advanced_research_run`.
+    """
+
+    if not tasks or len(tasks) != len(set(tasks)) or not set(tasks) <= set(_TASKS):
+        raise ValueError("authenticated OOF tasks must be a unique non-empty task subset")
+    parquet_path, report, parquet_sha256 = _authenticate_advanced_research_bundle(
+        parquet_path
+    )
+    columns = ("symbol", "trading_date", "target", "label_end", "prediction", "task")
+    frame = pd.read_parquet(
+        parquet_path,
+        columns=list(columns),
+        filters=[("task", "in", list(tasks))],
+    )
+    if _file_sha256(parquet_path) != parquet_sha256:
+        raise RuntimeError("advanced research Parquet changed while it was being read")
+    if tuple(frame.columns) != columns:
+        raise RuntimeError("advanced research filtered OOF schema mismatch")
+    observed_tasks = set(frame["task"].astype(str).unique())
+    if not observed_tasks <= set(tasks):
+        raise RuntimeError("advanced research filtered OOF contains an unrequested task")
+    return report, frame
+
+
+def _authenticate_advanced_research_bundle(
+    parquet_path: Path,
+) -> tuple[Path, AdvancedResearchReport, str]:
     parquet_path = parquet_path.resolve()
     report_id = parquet_path.name.removesuffix(".oof.parquet")
     if parquet_path.parent.name != report_id:
@@ -2239,17 +2286,15 @@ def load_advanced_research_run(
         raise RuntimeError("advanced research metadata hash mismatch")
     if Path(str(payload.get("parquet_path", ""))).resolve() != parquet_path:
         raise RuntimeError("advanced research Parquet path metadata mismatch")
-    if _file_sha256(parquet_path) != str(payload.get("parquet_sha256", "")):
+    parquet_sha256 = str(payload.get("parquet_sha256", ""))
+    if _file_sha256(parquet_path) != parquet_sha256:
         raise RuntimeError("advanced research Parquet hash mismatch")
     report = AdvancedResearchReport.model_validate(payload["report"])
     if report.report_id != report_id:
         raise RuntimeError("advanced research report identity mismatch")
-    frame = pd.read_parquet(parquet_path)
-    if len(frame) != report.oof_rows or _frame_hash(frame) != report.oof_sha256:
-        raise RuntimeError("advanced research OOF content identity mismatch")
     if _stable_hash(_report_identity(report)) != report.report_id:
         raise RuntimeError("advanced research report content identity mismatch")
-    return report, frame
+    return parquet_path, report, parquet_sha256
 
 
 def _run_ablations(

@@ -21,11 +21,13 @@ from stock_ai.ml.advanced import (
     TuningResult,
     UncertaintyCalibration,
     feature_family_ablation_plan,
+    load_authenticated_advanced_oof_slice,
     write_advanced_research_run,
 )
 from stock_ai.ml.campaign import (
     CampaignBatchStatus,
     create_campaign_manifest,
+    load_campaign_manifest,
     write_campaign_manifest,
 )
 from stock_ai.ml.selection import (
@@ -69,6 +71,25 @@ def test_complete_development_selection_is_content_addressed_and_holdout_closed(
     path = write_development_selection(selection, tmp_path / "selections")
     assert load_development_selection(path) == selection
     assert write_development_selection(selection, tmp_path / "selections") == path
+
+    candidate_manifest = load_campaign_manifest(candidate_path)
+    candidate_oof_path = candidate_manifest.batches[0].oof_path
+    assert candidate_oof_path is not None
+    sliced_report, sliced = load_authenticated_advanced_oof_slice(
+        Path(candidate_oof_path), tasks=("regression", "ranking")
+    )
+    assert sliced_report.report_id == candidate_manifest.batches[0].report_id
+    assert set(sliced["task"]) == {"regression", "ranking"}
+    assert tuple(sliced.columns) == (
+        "symbol",
+        "trading_date",
+        "target",
+        "label_end",
+        "prediction",
+        "task",
+    )
+    with pytest.raises(ValueError, match="unique non-empty task subset"):
+        load_authenticated_advanced_oof_slice(Path(candidate_oof_path), tasks=())
 
 
 def test_selection_fails_closed_for_incomplete_candidate_matrix(tmp_path: Path) -> None:

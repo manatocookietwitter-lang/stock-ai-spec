@@ -43,6 +43,7 @@ from stock_ai.ml.advanced import (
     ModelTask,
     UncertaintyCalibration,
     load_advanced_research_run,
+    load_authenticated_advanced_oof_slice,
 )
 from stock_ai.ml.campaign import (
     CampaignBatchStatus,
@@ -805,7 +806,10 @@ def _aligned_rank_component_frame(runs: Sequence[_AuthenticatedRun]) -> pd.DataF
     identity_frame: pd.DataFrame | None = None
     component_values: dict[str, np.ndarray] = {}
     for run in sorted(runs, key=lambda item: (item.batch.model_family, cast(int, item.batch.seed))):
-        report, oof = load_advanced_research_run(run.oof_path)
+        report, oof = load_authenticated_advanced_oof_slice(
+            run.oof_path,
+            tasks=("regression", "ranking"),
+        )
         if report.report_id != run.report.report_id:
             raise RuntimeError("candidate report changed between authentication passes")
         stackable = oof.loc[oof["task"].isin(("regression", "ranking"))].copy()

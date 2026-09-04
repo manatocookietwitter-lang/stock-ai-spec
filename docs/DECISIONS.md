@@ -713,3 +713,8 @@ ensemble結果、単回accessを残すが、holdout後のtuning・再選択・�
 単回評価も長時間化し得るため、全development選択の固定後に限って専用Task Scheduler runnerを明示登録できる。
 runnerはevaluator source / dependency lockとcommitを照合し、API keyを継承せず、Windows再起動後も同じledgerだけを
 resumeする。status入口はread-onlyであり、broker発注や自動売買を行わない。
+
+実データOOFのensemble整列では、各candidate bundleを最初の選択取込時に全logical-frame hashまで順次認証する。
+二回目の整列passは同じParquetのbyte hashとreport identityを読込前後に再認証した上で、regression / rankingに必要な
+6列だけをpredicate付きで読む。quantile / large-loss rowを同時に再materializeせず、行削減や未認証sampleへのfallbackも
+行わない。

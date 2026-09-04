@@ -529,6 +529,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - purged development OOFだけからhorizon別feature、expected return、rank、downside quantile、large-loss model、全parameter、非負simplex ensemble weight、uncertaintyを選び、content-addressed selectionへ固定する。ensembleは同じmeta-evaluation区間のbest componentを上回った場合だけ採用する
 - 選択後だけ使えるlocked holdout evaluatorを追加した。holdout読込前にselectionと唯一のledger path / evaluator commitを一度だけ結び付け、component単位のtargetなしprediction checkpointからresumeし、完了済みcomponentを再fitしない
 - completed reportはselection / Build / Dataset / evaluator / feature definition / prediction hashを再認証する。選択・holdout結果はappend-only Experiment Registryへidempotentに保存し、task固有metricを欠損時0へ置換しない
+- full JPX OOFのselection再読込は、最初に全bundleのlogical / Parquet / report hashを順次認証し、ensemble整列passでは同じParquet hashを読込前後に確認してregression / rankingの6列だけをpredicate読込する。quantile / large-loss rowの不要な再materializeを避けるが、認証・期間・行は省略しない
 - holdoutの独立runnerとTask Scheduler登録入口を追加した。全development選択固定後の明示登録時だけ単回評価を開始し、Windows再起動後も同じledgerをresumeする。研究workerへAPI keyを渡さず、read-only statusは状態を変更しない
 - fixtureで中断・resume・成功済みcomponent skip・改ざん・alternate root / commit拒否・selection schema不整合を検証した。実データlocked holdoutは未開封で、Champion候補もまだ固定していない
-- 隔離branchの全品質gateはRuff / strict mypy（48 source files）/ Python 229 test / branch coverage 85.35% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がpass。PowerShell 5.1で両holdout runner scriptの構文とTask Scheduler引数表示も検証した
+- 隔離branchの全品質gateはRuff / strict mypy（48 source files）/ Python 229 test / branch coverage 85.33% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がpass。PowerShell 5.1で両holdout runner scriptの構文とTask Scheduler引数表示も検証した
