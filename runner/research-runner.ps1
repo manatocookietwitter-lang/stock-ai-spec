@@ -33,6 +33,16 @@ function Test-WorkerIdentity($Batch) {
     return [Math]::Abs(($observedStart - $recordedStart).TotalSeconds) -le 120
 }
 
+function Invoke-PythonCode([string]$Python, [string]$Code, [string[]]$Arguments) {
+    # Windows PowerShell 5.1 rewrites embedded double quotes in native command
+    # arguments.  Base64 keeps the audited static snippet byte-exact without
+    # persisting a temporary source file.
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Code))
+    $bootstrap = "import base64;exec(base64.b64decode('$encoded'))"
+    & $Python -c $bootstrap @Arguments
+    return $LASTEXITCODE
+}
+
 function Invoke-PythonValidation([string]$ManifestPath, [bool]$FullArtifactCheck) {
     $python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
@@ -54,8 +64,9 @@ if sys.argv[2] == "verify":
     completed = frozenset(batch.batch_id for batch in manifest.batches if batch.status == "SUCCEEDED")
     reconcile_campaign(manifest, batch_ids=completed)
 '@
-    & $python -c $validation $ManifestPath $(if ($FullArtifactCheck) { 'verify' } else { 'metadata' })
-    if ($LASTEXITCODE -ne 0) {
+    $mode = if ($FullArtifactCheck) { 'verify' } else { 'metadata' }
+    $exitCode = Invoke-PythonCode $python $validation @($ManifestPath, $mode)
+    if ($exitCode -ne 0) {
         throw 'campaign manifest, build, or completed artifact authentication failed'
     }
 }
@@ -151,8 +162,8 @@ for batch in manifest.batches:
         batch.last_error = "independent runner observed missing or mismatched worker identity"
 write_campaign_manifest(manifest, path)
 '@
-    & $python -c $transition $ManifestPath @BatchIds
-    if ($LASTEXITCODE -ne 0) {
+    $exitCode = Invoke-PythonCode $python $transition (@($ManifestPath) + $BatchIds)
+    if ($exitCode -ne 0) {
         throw 'failed to persist stale RUNNING to INTERRUPTED transition'
     }
 }
