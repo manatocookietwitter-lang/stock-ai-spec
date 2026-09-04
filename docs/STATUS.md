@@ -521,3 +521,13 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - Goal 5は`operational_ledger / in_app_notifications`が`AVAILABLE`、remote accessは`LOCALHOST_ONLY`、web pushは`BLOCKED_BY_CONFIGURATION`
 - 実運用開始には、Goal 3の固定Championと単回holdout結果、exact 11:30前場provider、local PWAでユーザーが手入力する実保有・account bucket・available / reserved cash・取得単価・税/NISA状態、cost/slippage方針、認証済みJPX Paper calendarが必要。SBI CSVはD068どおり必須ではない
 - `order_submission`は`OUT_OF_SCOPE`であり、broker発注・自動売買は実装しない
+
+## 2026-09-04 granular checkpoint隔離実装
+
+- 実行中のmain campaignへ一切のsource変更を見せないため、別Git worktree / branch `goal3-granular-checkpoints`で中断耐性を実装した。mainへは現campaign完了後の安全境界までmergeしない
+- recoverable branch commitは`26817dc`（fold / Optuna永続化）と`253644f`（単発CLI cache隔離・改ざん回帰test）
+- 新campaign manifest v2は`model family × horizon × seed`単位。各walk-forward foldをDataset / Feature / code / config / parameter / seed / split hash付きParquetとしてatomic publishし、完了済みfoldを再認証してskipする
+- Optunaはcheckpoint namespace内SQLiteへ永続化し、study provenanceを認証する。完了済みtrial数と累積時間を元のboundから差し引いてresumeし、残存`RUNNING` trialはsingle-worker lock取得後だけ`FAIL`へ遷移する
+- progress manifestはfoldの`RUNNING / INTERRUPTED / FAILED / SUCCEEDED`、attempt、artifactをatomic保存し、worker死後の`RUNNING`を`INTERRUPTED`へ回復する。成功表示とartifact欠損・Parquet / logical frame / metadata改ざんはfail closed
+- read-only granular status commandとWindows runnerのseed表示 / checkpoint-root引継ぎを追加。development checkpointはlocked holdoutを含まない
+- 隔離branch gate: Ruff pass、strict mypy 46 source pass、pytest 215 pass、branch coverage 85.03% pass。Production researchの同一testを連続2回実行してcache混線がないことも確認した
