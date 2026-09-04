@@ -59,6 +59,57 @@ function Assert-SourceProvenance([string]$Commit) {
     }
 }
 
+function Test-WorkerIdentity($Batch) {
+    if ($null -eq $Batch.child_pid -or $null -eq $Batch.started_at) {
+        return $false
+    }
+    $process = Get-Process -Id ([int]$Batch.child_pid) -ErrorAction SilentlyContinue
+    if ($null -eq $process -or $process.ProcessName -notlike 'python*') {
+        return $false
+    }
+    try {
+        $recordedStart = [DateTimeOffset]::Parse([string]$Batch.started_at).UtcDateTime
+        $observedStart = $process.StartTime.ToUniversalTime()
+    } catch {
+        return $false
+    }
+    return [Math]::Abs(($observedStart - $recordedStart).TotalSeconds) -le 120
+}
+
+function Invoke-PythonCode([string]$Python, [string]$Code, [string[]]$Arguments) {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Code))
+    $bootstrap = "import base64;exec(base64.b64decode('$encoded'))"
+    & $Python -c $bootstrap @Arguments
+    return $LASTEXITCODE
+}
+
+function Set-StaleBatchesInterrupted([string]$ManifestPath, [string[]]$BatchIds) {
+    if ($BatchIds.Count -eq 0) {
+        return
+    }
+    $transition = @'
+from datetime import UTC, datetime
+from pathlib import Path
+import sys
+from stock_ai.ml.campaign import CampaignBatchStatus, load_campaign_manifest, write_campaign_manifest
+
+path = Path(sys.argv[1]).resolve()
+targets = frozenset(sys.argv[2:])
+manifest = load_campaign_manifest(path)
+for batch in manifest.batches:
+    if batch.batch_id in targets and batch.status is CampaignBatchStatus.RUNNING:
+        batch.status = CampaignBatchStatus.INTERRUPTED
+        batch.child_pid = None
+        batch.completed_at = datetime.now(UTC)
+        batch.last_error = "candidate runner observed missing or mismatched worker identity"
+write_campaign_manifest(manifest, path)
+'@
+    $exitCode = Invoke-PythonCode $python $transition (@($ManifestPath) + $BatchIds)
+    if ($exitCode -ne 0) {
+        throw 'failed to persist stale candidate RUNNING to INTERRUPTED transition'
+    }
+}
+
 function Write-RunnerEvent([string]$Root, [string]$Event, [string]$Detail) {
     New-Item -ItemType Directory -Path $Root -Force | Out-Null
     $record = [ordered]@{
@@ -90,11 +141,53 @@ if (-not (Test-Path -LiteralPath $buildPath -PathType Leaf)) {
 $env:PYTHONPATH = Join-Path $ProjectRoot 'src'
 Remove-Item Env:JQUANTS_API_KEY -ErrorAction SilentlyContinue
 
-if ($Action -eq 'status') {
-    & $python -m stock_ai research candidate-status `
+function Get-CandidateStatus() {
+    $statusJson = @(& $python -m stock_ai research candidate-status `
         --feature-selection $selectionPath `
-        --campaign-root $campaignPath
-    exit $LASTEXITCODE
+        --campaign-root $campaignPath)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'candidate status authentication failed'
+    }
+    $status = ($statusJson -join [Environment]::NewLine) | ConvertFrom-Json
+    foreach ($horizon in $status.horizons) {
+        if ([string]$horizon.status -ne 'STARTED') {
+            continue
+        }
+        $manifestPath = [string]$horizon.campaign.manifest
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($batchStatus in $horizon.campaign.batches) {
+            $batch = @($manifest.batches | Where-Object {
+                [string]$_.batch_id -eq [string]$batchStatus.batch_id
+            }) | Select-Object -First 1
+            if ($null -eq $batch) {
+                throw 'candidate status batch is absent from its authenticated manifest'
+            }
+            $workerAlive = ([string]$batch.status -eq 'RUNNING') -and (Test-WorkerIdentity $batch)
+            $batchStatus.worker_alive = $workerAlive
+            $batchStatus.effective_status = $(
+                if ([string]$batch.status -eq 'RUNNING' -and -not $workerAlive) {
+                    'INTERRUPTED'
+                } else {
+                    [string]$batch.status
+                }
+            )
+        }
+        $current = @($horizon.campaign.batches | Where-Object {
+            [string]$_.effective_status -eq 'RUNNING'
+        }) | Select-Object -First 1
+        if ($null -eq $current) {
+            $current = @($horizon.campaign.batches | Where-Object {
+                [string]$_.effective_status -ne 'SUCCEEDED'
+            }) | Select-Object -First 1
+        }
+        $horizon.campaign.current_batch = $current
+    }
+    return $status
+}
+
+if ($Action -eq 'status') {
+    Get-CandidateStatus | ConvertTo-Json -Depth 12
+    exit 0
 }
 
 Assert-SourceProvenance $CodeCommit
@@ -115,6 +208,31 @@ try {
 }
 
 try {
+    $status = Get-CandidateStatus
+    $active = @(
+        $status.horizons |
+            Where-Object { [string]$_.status -eq 'STARTED' } |
+            ForEach-Object { $_.campaign.batches } |
+            Where-Object { [string]$_.effective_status -eq 'RUNNING' }
+    )
+    if ($active.Count -gt 0) {
+        Write-RunnerEvent $logPath 'ALREADY_RUNNING' (($active.batch_id) -join ',')
+        exit 0
+    }
+    foreach ($horizon in $status.horizons) {
+        if ([string]$horizon.status -ne 'STARTED') {
+            continue
+        }
+        $stale = @(
+            $horizon.campaign.batches |
+                Where-Object {
+                    [string]$_.stored_status -eq 'RUNNING' -and
+                    [string]$_.effective_status -eq 'INTERRUPTED'
+                } |
+                ForEach-Object { [string]$_.batch_id }
+        )
+        Set-StaleBatchesInterrupted ([string]$horizon.campaign.manifest) $stale
+    }
     $arguments = @(
         '-m', 'stock_ai', 'research', 'candidate-campaigns',
         '--feature-selection', $selectionPath,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,7 @@ from stock_ai.ml.selection import (
     FrozenModelComponent,
     HorizonDevelopmentSelection,
     HorizonFeatureSelection,
+    write_development_feature_selection,
     write_development_selection,
 )
 
@@ -1008,6 +1011,96 @@ def test_selection_and_holdout_cli_publish_auditable_results(
     )
     assert status.exit_code == 0
     assert '"status": "RUNNING"' in status.output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Task Scheduler runner")
+def test_candidate_runner_status_and_registration_are_read_only(tmp_path: Path) -> None:
+    selection = _selection_fixture(build_id="a" * 64, dataset_id="b" * 64)
+    feature_selection = _feature_selection_fixture(selection)
+    feature_path = write_development_feature_selection(
+        feature_selection,
+        tmp_path / "feature-selections",
+    )
+    build_path = tmp_path / "build.json"
+    build_path.write_text("{}", encoding="utf-8")
+    project_root = Path(__file__).resolve().parents[1]
+    powershell = (
+        Path(os.environ["SystemRoot"])
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    environment = os.environ.copy()
+    environment["JQUANTS_API_KEY"] = "test-placeholder-never-print"
+    feature_before = feature_path.read_bytes()
+
+    status = subprocess.run(
+        [
+            str(powershell),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(project_root / "runner" / "candidate-runner.ps1"),
+            "-Action",
+            "status",
+            "-FeatureSelection",
+            str(feature_path),
+            "-BuildManifest",
+            str(build_path),
+            "-CodeCommit",
+            "unused-for-read-only-status",
+            "-CampaignRoot",
+            str(tmp_path / "campaigns"),
+        ],
+        cwd=project_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert status.returncode == 0, status.stderr
+    status_payload = json.loads(status.stdout)
+    assert status_payload["feature_selection_id"] == feature_selection.feature_selection_id
+    assert [item["status"] for item in status_payload["horizons"]] == [
+        "NOT_STARTED",
+        "NOT_STARTED",
+        "NOT_STARTED",
+    ]
+    assert "test-placeholder-never-print" not in status.stdout + status.stderr
+    assert feature_path.read_bytes() == feature_before
+    assert not (tmp_path / "campaigns").exists()
+
+    registration = subprocess.run(
+        [
+            str(powershell),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(project_root / "runner" / "register-candidate-runner-task.ps1"),
+            "-Action",
+            "show",
+            "-FeatureSelection",
+            str(feature_path),
+            "-BuildManifest",
+            str(build_path),
+            "-CodeCommit",
+            "candidate-commit",
+        ],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert registration.returncode == 0, registration.stderr
+    assert "-TuningTrials 20" in registration.stdout
+    assert "-RunDiagnostics:true" in registration.stdout
+    assert "holdout_accessed" in registration.stdout
+    assert ": False" in registration.stdout
 
 
 def _feature_selection_fixture(
