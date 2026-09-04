@@ -405,6 +405,18 @@ rejection reason
 - 進捗照会はread-onlyとし、周期的なPID / CPU pollingを必須にしない
 - development checkpointへlocked final holdoutのrow、label、metricを保存しない
 
+## 7.3 Development選択の固定とlocked holdout単回評価
+
+- feature familyはablation campaignのstrictly-earlier tuning evidenceをseedごとに集約し、3 seed以上のうち3分の2以上が支持したものだけをhorizon別に固定する
+- final-candidate campaignは固定済みfeature列だけで、LightGBM / XGBoost / CatBoost、1 / 5 / 20日、3 seed以上、regression / ranking / quantile / large-lossを完走する
+- model、feature、hyperparameter、ensemble weight、uncertaintyの選択はpurged development OOFだけで完了し、一つのcontent-addressed selection artifactとして保存する
+- 選択artifactはProduction Build、Dataset / Feature snapshot、feature definition、campaign / report / code identity、holdout境界を認証し、`locked_holdout_accessed=false`を固定する
+- locked holdout evaluatorは、選択artifactへ一つのledger path、evaluator commit、Build / Dataset identityをholdout読込前に一度だけ紐付ける
+- 中断時はmodel component単位のtargetを含まないprediction artifactから再開し、成功済みcomponentを再fitしない。生存workerが所有するOS lockと競合した場合は二重実行を拒否する
+- 完了reportは全component hash、固定ensemble、holdout期間、選択済みfeature definition hashを再認証し、Experiment Registryへ`locked_holdout_accessed=true`かつ`research_only`で一度だけ追記する
+- holdout結果を理由にfeature、model、parameter、ensemble weightを変更しない。結果が悪くても同じholdoutを開き直さず、Champion候補の不採用または将来のlive OOS観測へ進む
+- holdout評価はmodel採用を意味せず、historical revision制約、live OOS evidence、明示承認が残る間は`adoption_eligible=false`とする
+
 ## 8. 固定実験一覧
 
 | ID | 実験 |

@@ -694,3 +694,22 @@ config / horizon / family / seed identityを固定する。再開時は完了済
 残trial数と累積実行時間だけを元のtrial / timeout上限内で実行する。停止時に残った`RUNNING` trialは、外側の
 single-worker lock取得後だけ`FAIL`へ遷移する。SQLite破損、study provenance欠落・不一致は新studyへ黙って
 fallbackせず停止する。development checkpointはlocked holdout rowを含まず、holdout評価入口とは分離する。
+
+### D074 — Development選択を完全固定してからlocked holdoutを一つのledgerで単回評価する
+
+Goal 3のfeature familyはablation campaignのtuning期間だけを用いたseed voteで決め、選択featureによる
+final-candidate campaignを別に完走する。LightGBM / XGBoost / CatBoost、1 / 5 / 20日、3 seed以上、
+regression / ranking / quantile / large-lossの全証跡を認証し、model、feature、hyperparameter、ensemble weight、
+uncertaintyの選択をpurged development OOFだけで完了したcontent-addressed selection artifactへ固定する。
+このartifactは`locked_holdout_accessed=false`かつ`adoption_eligible=false`であり、不完全matrixやsnapshot / Build /
+feature / code identityの不一致を拒否する。
+
+locked holdoutはselection directoryへ追加する一つの`holdout-access.json`で、selection、Build、Dataset、
+evaluator commit、唯一のledger pathをholdout読込前に結び付ける。別root、別commit、別Buildによる再評価は拒否し、
+中断後は同じledger内のmodel component単位prediction-only checkpointから再開する。prediction artifactにtargetを
+保存せず、成功済みcomponentは再fitしない。最終reportとExperiment Registryには固定済みfeature hash、component /
+ensemble結果、単回accessを残すが、holdout後のtuning・再選択・自動採用には使わない。
+
+単回評価も長時間化し得るため、全development選択の固定後に限って専用Task Scheduler runnerを明示登録できる。
+runnerはevaluator source / dependency lockとcommitを照合し、API keyを継承せず、Windows再起動後も同じledgerだけを
+resumeする。status入口はread-onlyであり、broker発注や自動売買を行わない。

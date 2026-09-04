@@ -84,6 +84,9 @@ from stock_ai.ml import (
     AdvancedResearchExecutionError,
     AdvancedResearchRun,
     BaselinePredictionBundle,
+    DevelopmentSelectionArtifact,
+    HoldoutComponentResult,
+    LockedHoldoutReport,
     MorningResearchConfig,
     ProductionDatasetSnapshot,
     ProductionFeatureSets,
@@ -95,7 +98,9 @@ from stock_ai.ml import (
     build_production_feature_sets,
     build_production_supervised_dataset,
     build_supervised_dataset,
+    evaluate_locked_holdout,
     fit_morning_research_bundle,
+    freeze_development_selection,
     infer_current_morning_predictions,
     load_advanced_research_run,
     load_morning_dataset_snapshot,
@@ -104,6 +109,7 @@ from stock_ai.ml import (
     load_production_feature_snapshot,
     load_production_feature_snapshot_metadata,
     read_checkpoint_status,
+    read_locked_holdout_status,
     reserve_locked_final_holdout,
     run_advanced_research,
     run_morning_research,
@@ -111,6 +117,7 @@ from stock_ai.ml import (
     walk_forward_validate,
     write_advanced_research_run,
     write_dataset_snapshot,
+    write_development_selection,
     write_morning_dataset_snapshot,
     write_morning_research_run,
     write_production_baseline_report,
@@ -1441,6 +1448,297 @@ def research_checkpoint_status(
         typer.echo(f"research checkpoint status blocked: {exc}", err=True)
         raise typer.Exit(code=2) from None
     typer.echo(json.dumps(status, ensure_ascii=False, sort_keys=True))
+
+
+@research_app.command("freeze-selection")
+def research_freeze_selection(
+    ablation_campaign: Annotated[
+        list[Path],
+        typer.Option(
+            "--ablation-campaign",
+            exists=True,
+            dir_okay=False,
+            help="Completed v2 development campaign; repeat for split horizon plans.",
+        ),
+    ],
+    candidate_campaign: Annotated[
+        list[Path],
+        typer.Option(
+            "--candidate-campaign",
+            exists=True,
+            dir_okay=False,
+            help="Completed v2 final-candidate campaign; repeat for split horizon plans.",
+        ),
+    ],
+    selection_root: Annotated[
+        Path,
+        typer.Option(help="Content-addressed development selection root."),
+    ] = Path("artifacts/selections/goal3"),
+    experiment_registry: Annotated[
+        Path,
+        typer.Option(help="Append-only Goal 3 selection/final evaluation registry."),
+    ] = Path("artifacts/experiments/advanced.jsonl"),
+) -> None:
+    """Freeze features, models, parameters, ensemble, and uncertainty before holdout."""
+
+    try:
+        selection = freeze_development_selection(
+            ablation_campaign_paths=tuple(ablation_campaign),
+            candidate_campaign_paths=tuple(candidate_campaign),
+        )
+        path = write_development_selection(selection, selection_root)
+        ExperimentRegistry(experiment_registry).append_idempotent(
+            _selection_experiment_record(selection, path=path)
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(f"development selection blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"selection={selection.selection_id} holdout_accessed=false "
+        "choices_complete=true"
+    )
+    for horizon in selection.horizons:
+        typer.echo(
+            f"horizon={horizon.horizon}d features={len(horizon.feature_names)} "
+            f"expected_return={horizon.expected_return_component.component_name} "
+            f"rank={horizon.rank_component.component_name} "
+            f"ensemble_adopted={str(horizon.ensemble_adopted).lower()}"
+        )
+    typer.echo(f"path={path}")
+
+
+@research_app.command("holdout-evaluate")
+def research_holdout_evaluate(
+    selection: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Authenticated development selection frozen before holdout access.",
+        ),
+    ],
+    build_manifest: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Exact Production Build used by the frozen selection.",
+        ),
+    ],
+    code_commit: Annotated[
+        str,
+        typer.Option(help="Exact evaluator source commit; changing it after access is rejected."),
+    ],
+    evaluation_root: Annotated[
+        Path,
+        typer.Option(help="One-shot ledger, prediction checkpoint, and report root."),
+    ] = Path("artifacts/holdout/goal3"),
+    experiment_registry: Annotated[
+        Path,
+        typer.Option(help="Append-only Goal 3 selection/final evaluation registry."),
+    ] = Path("artifacts/experiments/advanced.jsonl"),
+) -> None:
+    """Run or resume the sole post-selection locked-holdout evaluation."""
+
+    try:
+        result = evaluate_locked_holdout(
+            selection_path=selection,
+            build_manifest_path=build_manifest,
+            evaluation_root=evaluation_root,
+            evaluator_code_commit=code_commit,
+        )
+        ExperimentRegistry(experiment_registry).append_idempotent(
+            _holdout_experiment_record(result.report, path=result.report_path)
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(f"locked holdout evaluation blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        f"report={result.report.report_id} selection={result.report.selection_id} "
+        f"holdout={result.report.locked_holdout_start}..{result.report.locked_holdout_end} "
+        f"resumed={str(result.resumed).lower()} adoption_eligible=false"
+    )
+    for ensemble in result.report.ensemble_results:
+        rank_ic = (
+            "NA"
+            if ensemble.mean_daily_rank_ic is None
+            else f"{ensemble.mean_daily_rank_ic:.8f}"
+        )
+        typer.echo(
+            f"horizon={ensemble.horizon}d ensemble_adopted_on_development="
+            f"{str(ensemble.adopted_on_development).lower()} "
+            f"holdout_rank_ic={rank_ic} rows={ensemble.rows}"
+        )
+    typer.echo(f"path={result.report_path}")
+    typer.echo("RESEARCH ONLY - holdout results must not trigger tuning or automatic trading.")
+
+
+@research_app.command("holdout-status")
+def research_holdout_status(
+    evaluation_directory: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=False,
+            help="Exact selection-specific holdout evaluation directory.",
+        ),
+    ],
+) -> None:
+    """Read authenticated holdout progress without changing its ledger or worker."""
+
+    try:
+        status = read_locked_holdout_status(evaluation_directory)
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(f"locked holdout status blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(json.dumps(dict(status), ensure_ascii=False, sort_keys=True))
+
+
+def _selection_experiment_record(
+    selection: DevelopmentSelectionArtifact,
+    *,
+    path: Path,
+) -> ExperimentRecord:
+    selected_features = {
+        name for horizon in selection.horizons for name in horizon.feature_names
+    }
+    return ExperimentRecord(
+        experiment_id=f"selection-{selection.selection_id}",
+        created_at=selection.created_at,
+        hypothesis=(
+            "All Goal 3 model, feature, hyperparameter, ensemble, and uncertainty choices "
+            "are frozen from development OOF before locked holdout access"
+        ),
+        data_snapshot_id=selection.data_snapshot_id,
+        feature_set_version=V2_EXTENDED_MANIFEST.feature_set_version,
+        preprocessing_version=V2_EXTENDED_MANIFEST.preprocessing_version,
+        feature_definition_hashes={
+            name: V2_EXTENDED_MANIFEST.feature_definition_hashes[name]
+            for name in V2_EXTENDED_MANIFEST.feature_names
+            if name in selected_features
+        },
+        code_commit=",".join(selection.source_code_commits),
+        config_hash=selection.selection_id,
+        model_type="goal3_development_champion_candidate",
+        parameters={
+            "selection_id": selection.selection_id,
+            "selection_path": str(path.resolve()),
+            "build_id": selection.build_id,
+            "candidate_campaign_ids": ",".join(selection.candidate_campaign_ids),
+            "ablation_campaign_ids": ",".join(selection.ablation_campaign_ids),
+            "source_report_ids": ",".join(selection.source_report_ids),
+            "seeds": ",".join(str(seed) for seed in selection.seeds),
+            "locked_holdout_start": selection.locked_holdout_start,
+        },
+        seed=None,
+        fold_results=tuple(
+            {
+                "horizon": horizon.horizon,
+                "feature_count": len(horizon.feature_names),
+                "expected_return_component": horizon.expected_return_component.component_name,
+                "rank_component": horizon.rank_component.component_name,
+                "downside_component": horizon.downside_quantile_component.component_name,
+                "large_loss_component": horizon.large_loss_component.component_name,
+                "ensemble_adopted": str(horizon.ensemble_adopted).lower(),
+                "ensemble_weights": json.dumps(
+                    dict(
+                        zip(
+                            horizon.ensemble.component_names,
+                            horizon.ensemble.weights,
+                            strict=True,
+                        )
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                **(
+                    {"development_ensemble_rank_ic": horizon.ensemble.mean_daily_rank_ic}
+                    if horizon.ensemble.mean_daily_rank_ic is not None
+                    else {}
+                ),
+            }
+            for horizon in selection.horizons
+        ),
+        aggregate_results={
+            "feature_selection_complete": "true",
+            "model_selection_complete": "true",
+            "hyperparameter_selection_complete": "true",
+            "ensemble_selection_complete": "true",
+            "locked_holdout_accessed": "false",
+            "adoption_eligible": "false",
+        },
+        decision="research_only",
+        locked_holdout_accessed=False,
+    )
+
+
+def _holdout_experiment_record(
+    report: LockedHoldoutReport,
+    *,
+    path: Path,
+) -> ExperimentRecord:
+    return ExperimentRecord(
+        experiment_id=f"holdout-{report.report_id}",
+        created_at=report.created_at,
+        hypothesis="The immutable development Champion candidate generalizes once to holdout",
+        data_snapshot_id=report.data_snapshot_id,
+        feature_set_version=V2_EXTENDED_MANIFEST.feature_set_version,
+        preprocessing_version=V2_EXTENDED_MANIFEST.preprocessing_version,
+        feature_definition_hashes=report.feature_definition_hashes,
+        code_commit=report.evaluator_code_commit,
+        config_hash=report.selection_id,
+        model_type="goal3_locked_holdout_single_evaluation",
+        parameters={
+            "selection_id": report.selection_id,
+            "ledger_id": report.ledger_id,
+            "report_id": report.report_id,
+            "report_path": str(path.resolve()),
+            "build_id": report.build_id,
+            "locked_holdout_start": report.locked_holdout_start,
+            "locked_holdout_end": report.locked_holdout_end,
+        },
+        seed=None,
+        fold_results=tuple(
+            _holdout_component_audit_row(result)
+            for result in report.component_results
+        ),
+        aggregate_results={
+            "ensemble_results_json": json.dumps(
+                [item.model_dump(mode="json") for item in report.ensemble_results],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "selection_was_frozen_before_access": "true",
+            "model_choices_changed_after_access": "false",
+            "adoption_eligible": "false",
+        },
+        decision="research_only",
+        locked_holdout_accessed=True,
+    )
+
+
+def _holdout_component_audit_row(
+    result: HoldoutComponentResult,
+) -> dict[str, int | float | str]:
+    metrics = result.metrics
+    row: dict[str, int | float | str] = {
+        "component_key": result.component_key,
+        "horizon": metrics.horizon,
+        "model_family": metrics.model_family,
+        "task": metrics.task,
+        "seed": metrics.seed,
+        "rows": metrics.rows,
+    }
+    optional_metrics = {
+        "mean_squared_error": metrics.mean_squared_error,
+        "mean_daily_rank_ic": metrics.mean_daily_rank_ic,
+        "pinball_loss": metrics.pinball_loss,
+        "brier_score": metrics.brier_score,
+        "log_loss": metrics.log_loss,
+        "expected_calibration_error": metrics.expected_calibration_error,
+    }
+    row.update({name: value for name, value in optional_metrics.items() if value is not None})
+    return row
 
 
 def _advanced_campaign_child_command(

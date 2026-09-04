@@ -175,6 +175,36 @@ uncertainty calibrationを実装した。hyperparameter選択はstrictly earlier
 stacking・uncertainty calibration・reported coverageはさらに3つの時系列区間へ分離する。
 locked final holdoutは開かない。`research advanced`の成果物は常にresearch-onlyで、実注文を生成しない。
 
+ablation campaignと、その投票で固定したfeature subsetによるfinal-candidate campaignがすべて成功した後だけ、
+development OOFから全選択をcontent-addressed artifactへ固定する。
+
+```text
+stock-ai research freeze-selection \
+  --ablation-campaign <completed-v2-ablation-manifest> \
+  --candidate-campaign <completed-v2-final-candidate-manifest>
+```
+
+この段階で1 / 5 / 20日ごとのfeature family、expected-return / rank / downside / large-loss model、
+全hyperparameter、OOF ensemble weight、uncertainty calibrationが固定され、Experiment Registryには
+`locked_holdout_accessed=false`で記録される。不完全campaign、3 seed未満、snapshot / Build / feature / code不一致、
+holdoutを含むreportは拒否する。
+
+locked holdoutは固定後の明示的な単回入口だけで評価する。開始前にselection directoryへ一つの評価ledger pathと
+evaluator commitを不可逆に紐付け、model componentごとのprediction-only checkpointから再開する。別rootや別commitでの
+再評価、holdout結果を見た後の再選択・tuning、自動採用は認めない。
+
+```text
+stock-ai research holdout-evaluate \
+  --selection <content-addressed-selection.json> \
+  --build-manifest <exact-production-build.json> \
+  --code-commit <exact-evaluator-commit>
+stock-ai research holdout-status --evaluation-directory <selection-specific-directory>
+```
+
+長時間の単回評価をCodexやshell sessionから独立させる場合は、全development選択の固定を確認してからだけ
+`runner/register-holdout-runner-task.ps1 -Action install`を明示実行する。登録後はWindows再起動時にも同じledgerをresumeし、
+完了済みcomponentを再fitしない。`runner/holdout-runner.ps1 -Action status`はread-onlyである。
+
 ## Goal 4 前場AI研究基盤
 
 provider-neutralな09:00〜11:30 bar契約、F13 Morning Core、capabilityがある場合だけのF14

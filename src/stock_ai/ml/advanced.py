@@ -936,6 +936,64 @@ def _fit_predict(
     return np.asarray(model.predict(validation_x), dtype=float)
 
 
+def fit_predict_frozen_model(
+    training: pd.DataFrame,
+    prediction_frame: pd.DataFrame,
+    *,
+    feature_names: tuple[str, ...],
+    target_column: str,
+    horizon: int,
+    family: ModelFamily,
+    task: ModelTask,
+    seed: int,
+    parameters: Mapping[str, int | float],
+    config: AdvancedResearchConfig,
+) -> np.ndarray:
+    """Refit one already-selected component without inspecting evaluation outcomes."""
+
+    if (
+        config.horizons != (horizon,)
+        or config.model_families != (family,)
+        or config.seeds != (seed,)
+    ):
+        raise ValueError("frozen model identity does not match its source config")
+    required_training = {"trading_date", target_column, *feature_names}
+    required_prediction = set(feature_names)
+    if missing := sorted(required_training - set(training.columns)):
+        raise ValueError(f"frozen model training frame is missing: {', '.join(missing)}")
+    if missing := sorted(required_prediction - set(prediction_frame.columns)):
+        raise ValueError(f"frozen model prediction frame is missing: {', '.join(missing)}")
+    train = training.loc[training[target_column].notna()].sort_values(
+        ["trading_date", "symbol"] if "symbol" in training.columns else ["trading_date"],
+        kind="stable",
+    )
+    if train.empty or prediction_frame.empty:
+        raise ValueError("frozen model requires non-empty training and prediction rows")
+    preprocessor = FoldPreprocessor(
+        feature_names,
+        lower_quantile=config.clip_lower_quantile,
+        upper_quantile=config.clip_upper_quantile,
+        correlation_threshold=config.correlation_threshold,
+    ).fit(train)
+    prediction = _fit_predict(
+        family=family,
+        task=task,
+        train_x=preprocessor.transform(train),
+        train_target=train[target_column].astype(float),
+        train_dates=train["trading_date"],
+        validation_x=preprocessor.transform(prediction_frame),
+        seed=seed,
+        parameters=parameters,
+        config=config,
+    )
+    values = np.asarray(prediction, dtype=float)
+    if values.ndim != 1 or len(values) != len(prediction_frame):
+        raise RuntimeError("frozen model emitted a prediction vector with the wrong row count")
+    if not np.isfinite(values).all():
+        raise RuntimeError("frozen model emitted non-finite predictions")
+    return values
+
+
 def _regressor(
     family: ModelFamily,
     *,
