@@ -162,9 +162,12 @@ def test_batch_authentication_rejects_provenance_mismatch(
     )
     with pytest.raises(RuntimeError, match="config hash mismatch"):
         authenticate_batch_artifact(batch, code_commit=manifest.code_commit, oof_path=tmp_path)
-    assert discover_batch_artifact(
-        batch, code_commit=manifest.code_commit, report_root=tmp_path / "none"
-    ) is None
+    assert (
+        discover_batch_artifact(
+            batch, code_commit=manifest.code_commit, report_root=tmp_path / "none"
+        )
+        is None
+    )
 
 
 def test_reconcile_rejects_missing_previously_succeeded_result(tmp_path: Path) -> None:
@@ -217,8 +220,10 @@ def test_campaign_cli_runs_batches_and_persists_success(
     )
     monkeypatch.setattr("stock_ai.cli.subprocess.Popen", _CompletedProcess)
 
-    def succeed(manifest):  # type: ignore[no-untyped-def]
+    def succeed(manifest, *, batch_ids=None):  # type: ignore[no-untyped-def]
         for batch in manifest.batches:
+            if batch_ids is not None and batch.batch_id not in batch_ids:
+                continue
             if batch.status is CampaignBatchStatus.RUNNING:
                 batch.status = CampaignBatchStatus.SUCCEEDED
                 batch.report_id = "r" * 64

@@ -251,11 +251,15 @@ def discover_batch_artifact(
     return None
 
 
-def reconcile_campaign(manifest: ResearchCampaignManifest) -> ResearchCampaignManifest:
+def reconcile_campaign(
+    manifest: ResearchCampaignManifest, *, batch_ids: frozenset[str] | None = None
+) -> ResearchCampaignManifest:
     """Validate successes and recover or mark stale in-flight work after interruption."""
 
     report_root = Path(manifest.report_root)
     for batch in manifest.batches:
+        if batch_ids is not None and batch.batch_id not in batch_ids:
+            continue
         authenticated: tuple[str, str] | None = None
         if batch.oof_path is not None:
             try:

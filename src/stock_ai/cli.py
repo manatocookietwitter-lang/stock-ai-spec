@@ -1270,9 +1270,7 @@ def research_campaign(
                 if batch.status is CampaignBatchStatus.RUNNING
             ]
             if active:
-                raise RuntimeError(
-                    "campaign child is still running: " + ", ".join(active)
-                )
+                raise RuntimeError("campaign child is still running: " + ", ".join(active))
         else:
             manifest = expected
         write_campaign_manifest(manifest, campaign_manifest)
@@ -1328,7 +1326,7 @@ def research_campaign(
                 raise typer.Exit(code=130) from None
         batch.child_pid = None
         try:
-            reconcile_campaign(manifest)
+            reconcile_campaign(manifest, batch_ids=frozenset({batch.batch_id}))
         except (ValueError, RuntimeError, OSError) as exc:
             batch.last_error = str(exc)[:500]
         if return_code == 0 and batch.status is CampaignBatchStatus.SUCCEEDED:
