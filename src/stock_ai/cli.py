@@ -1012,9 +1012,11 @@ def research_advanced(
         typer.Option(help="Append-only success/failure experiment registry."),
     ] = Path("artifacts/experiments/advanced.jsonl"),
     checkpoint_root: Annotated[
-        Path,
-        typer.Option(help="Authenticated fold and persistent Optuna checkpoint root."),
-    ] = Path("artifacts/checkpoints/advanced"),
+        Path | None,
+        typer.Option(
+            help="Optional authenticated fold and Optuna root; campaigns always set it."
+        ),
+    ] = None,
 ) -> None:
     """Run leakage-safe GBDT/LTR/downside/OOF research; never open the holdout."""
 

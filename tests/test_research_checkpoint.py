@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from typer.testing import CliRunner
 import stock_ai.ml.advanced as advanced_module
 from stock_ai.cli import app
 from stock_ai.ml.advanced import AdvancedResearchConfig, bounded_optuna_search
-from stock_ai.ml.checkpoint import ResearchCheckpointStore, read_checkpoint_status
+from stock_ai.ml.checkpoint import ResearchCheckpointStore, read_checkpoint_status, stable_hash
 
 
 def _frame_hash(frame: pd.DataFrame) -> str:
@@ -47,8 +48,10 @@ def test_fold_checkpoint_is_atomic_authenticated_and_read_only_status(tmp_path: 
     store.begin_fold(evidence)
     artifact = store.publish_fold(evidence, frame, frame_hash=_frame_hash)
     assert artifact.is_dir()
+    assert store.publish_fold(evidence, frame, frame_hash=_frame_hash) == artifact
     with pytest.raises(RuntimeError, match="another worker"):
         ResearchCheckpointStore(tmp_path, provenance=_provenance())
+    store.close()
     store.close()
 
     progress_path = checkpoint_path / "progress.json"
@@ -88,6 +91,40 @@ def test_running_fold_becomes_interrupted_and_tamper_fails_closed(tmp_path: Path
         tampered.to_parquet(artifact / "oof.parquet", index=False)
         with pytest.raises(RuntimeError, match="Parquet hash mismatch"):
             resumed.load_fold(complete, frame_hash=_frame_hash)
+
+
+def test_success_without_artifact_and_progress_tamper_fail_closed(tmp_path: Path) -> None:
+    evidence = {"horizon": 5, "model": "catboost", "seed": 43, "fold": 0}
+    frame = pd.DataFrame({"symbol": ["1000"], "prediction": [0.3]})
+    with ResearchCheckpointStore(tmp_path, provenance=_provenance()) as store:
+        store.begin_fold(evidence)
+        artifact = store.publish_fold(evidence, frame, frame_hash=_frame_hash)
+        checkpoint_path = store.path
+    artifact.rename(artifact.with_name(f"{artifact.name}.missing"))
+    with ResearchCheckpointStore(tmp_path, provenance=_provenance()) as resumed:
+        with pytest.raises(RuntimeError, match="successful fold checkpoint artifact is missing"):
+            resumed.load_fold(evidence, frame_hash=_frame_hash)
+
+    progress_path = checkpoint_path / "progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["updated_at"] = "tampered"
+    progress_path.write_text(json.dumps(progress), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="progress metadata hash mismatch"):
+        read_checkpoint_status(checkpoint_path)
+
+
+def test_read_status_rejects_authenticated_wrong_schema(tmp_path: Path) -> None:
+    with ResearchCheckpointStore(tmp_path, provenance=_provenance()) as store:
+        checkpoint_path = store.path
+    progress_path = checkpoint_path / "progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["schema_version"] = "wrong"
+    progress["metadata_hash"] = stable_hash(
+        {key: value for key, value in progress.items() if key != "metadata_hash"}
+    )
+    progress_path.write_text(json.dumps(progress), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="progress schema mismatch"):
+        read_checkpoint_status(checkpoint_path)
 
 
 def test_generate_oof_predictions_reuses_every_completed_fold(
