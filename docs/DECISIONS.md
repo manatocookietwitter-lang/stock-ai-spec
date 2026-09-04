@@ -630,3 +630,13 @@ Parquet file SHA-256とmetadata hashも従来どおり必須とし、logical con
 405万行規模で全feature列を一括copyしたり、V0 / V1 / V2 / Datasetを同時loadして検証してはならない。
 無限値cleaningは1列ずつ行い、Build Manifestは各snapshotを順次content認証した後、Datasetとのkey一致とfeature値一致を
 最大8列ずつ比較する。resource不足時に行削減や近似比較へfallbackせずfail closedする。
+
+### D070 — Goal 3実データ研究は認証付き再開マニフェストで小分け実行する
+
+full JPXのadvanced researchは、`horizon × model family`を最小保存単位にする。各batchは独立subprocessで実行し、
+成功時だけ既存のcontent-addressed report / OOF bundleとappend-only Experiment Registryを公開する。campaign側は
+plan identity、config hash、attempt、child PID、log、report identityを小さなatomic manifestへ保存する。再開時は
+manifestの`SUCCEEDED`表示だけを信用せず、OOF Parquet、metadata hash、report identity、config hash、commitを再認証する。
+親processがartifact公開後かつmanifest更新前に停止した場合はreport rootから同一configを再発見し、未完了batchだけを
+再実行する。生存中childの重複起動は拒否し、停止済み`RUNNING`は`INTERRUPTED`へ移す。API keyはcommand、manifest、
+logへ渡さない。

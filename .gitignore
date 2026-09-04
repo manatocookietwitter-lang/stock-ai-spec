@@ -25,6 +25,8 @@ data/live/
 artifacts/models/
 artifacts/reports/
 artifacts/quarantine/
+artifacts/campaigns/
+artifacts/logs/
 .demo-artifacts/
 *.duckdb
 *.sqlite

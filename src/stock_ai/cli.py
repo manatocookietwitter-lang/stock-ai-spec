@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -113,6 +115,13 @@ from stock_ai.ml import (
     write_production_build_manifest,
     write_production_dataset_snapshot,
     write_production_feature_snapshot,
+)
+from stock_ai.ml.campaign import (
+    CampaignBatchStatus,
+    create_campaign_manifest,
+    load_campaign_manifest,
+    reconcile_campaign,
+    write_campaign_manifest,
 )
 from stock_ai.ml.experiments import ExperimentRecord, ExperimentRegistry
 from stock_ai.operations import (
@@ -418,8 +427,8 @@ def research_morning_fixture(
 ) -> None:
     """Run the explicit deterministic Goal 4 fixture; never a live-data fallback."""
 
-    bars, context, market, sectors, labels, freezes, trading_calendar = (
-        morning_research_fixture(periods=76)
+    bars, context, market, sectors, labels, freezes, trading_calendar = morning_research_fixture(
+        periods=76
     )
     capability_report = morning_capabilities(
         provider="deterministic-fixture",
@@ -1125,6 +1134,276 @@ def research_advanced(
         f"adoption_eligible={str(run.report.adoption_eligible).lower()} "
         f"metadata={metadata_path} oof={oof_path}"
     )
+
+
+@research_app.command("campaign")
+def research_campaign(
+    build_manifest: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Authenticated Production Build Manifest.",
+        ),
+    ],
+    code_commit: Annotated[str, typer.Option(help="Exact source commit for audit provenance.")],
+    horizons: Annotated[
+        str,
+        typer.Option(help="Comma-separated subset of 1,5,20; each is a separate batch."),
+    ] = "1,5,20",
+    model_families: Annotated[
+        str,
+        typer.Option(help="Comma-separated lightgbm,xgboost,catboost; each is a separate batch."),
+    ] = "lightgbm,xgboost,catboost",
+    seeds: Annotated[
+        str,
+        typer.Option(help="Comma-separated deterministic seeds used inside each batch."),
+    ] = "17",
+    target_family: Annotated[
+        str,
+        typer.Option(help="return, topix_excess, sector_excess, or beta_residual."),
+    ] = "return",
+    tuning_trials: Annotated[
+        int,
+        typer.Option(min=1, max=100, help="Hard Optuna bound per batch."),
+    ] = 3,
+    tuning_timeout_seconds: Annotated[
+        int,
+        typer.Option(min=10, max=7200, help="Hard tuning timeout per batch."),
+    ] = 900,
+    estimator_count: Annotated[
+        int,
+        typer.Option(min=5, max=2000, help="Bounded boosting iterations."),
+    ] = 100,
+    initial_train_periods: Annotated[
+        int,
+        typer.Option(min=20, help="Initial expanding training sessions."),
+    ] = 500,
+    validation_periods: Annotated[
+        int,
+        typer.Option(min=1, help="Validation sessions per fold."),
+    ] = 60,
+    step_periods: Annotated[
+        int,
+        typer.Option(min=1, help="Walk-forward step sessions."),
+    ] = 60,
+    holdout_periods: Annotated[
+        int,
+        typer.Option(min=1, help="Locked final holdout sessions."),
+    ] = 120,
+    run_ablations: Annotated[
+        bool,
+        typer.Option(help="Run chronological feature-family ablations in every batch."),
+    ] = False,
+    run_diagnostics: Annotated[
+        bool,
+        typer.Option(help="Run OOS permutation diagnostics in every batch."),
+    ] = False,
+    max_materialized_oof_rows: Annotated[
+        int,
+        typer.Option(min=1000, help="Fail-closed in-memory OOF row bound per batch."),
+    ] = 5_000_000,
+    max_model_fits: Annotated[
+        int,
+        typer.Option(min=10, help="Fail-closed model-fit bound per batch."),
+    ] = 5_000,
+    campaign_manifest: Annotated[
+        Path,
+        typer.Option(help="Atomic interruption/resume manifest."),
+    ] = Path("artifacts/campaigns/goal3-base.json"),
+    report_root: Annotated[
+        Path,
+        typer.Option(help="Content-addressed Goal 3 report root."),
+    ] = Path("artifacts/reports/advanced"),
+    experiment_registry: Annotated[
+        Path,
+        typer.Option(help="Append-only success/failure experiment registry."),
+    ] = Path("artifacts/experiments/advanced.jsonl"),
+    log_root: Annotated[
+        Path,
+        typer.Option(help="Per-attempt child logs; contains no credentials."),
+    ] = Path("artifacts/logs/goal3"),
+) -> None:
+    """Resume Goal 3 as authenticated horizon/model-family subprocess batches."""
+
+    try:
+        horizon_values = tuple(int(value.strip()) for value in horizons.split(",") if value.strip())
+        family_values = tuple(value.strip() for value in model_families.split(",") if value.strip())
+        seed_values = tuple(int(value.strip()) for value in seeds.split(",") if value.strip())
+        common_config: dict[str, object] = {
+            "target_family": target_family,
+            "seeds": seed_values,
+            "tuning_trials": tuning_trials,
+            "tuning_timeout_seconds": tuning_timeout_seconds,
+            "estimator_count": estimator_count,
+            "initial_train_periods": initial_train_periods,
+            "validation_periods": validation_periods,
+            "step_periods": step_periods,
+            "holdout_periods": holdout_periods,
+            "run_ablations": run_ablations,
+            "run_diagnostics": run_diagnostics,
+            "max_materialized_oof_rows": max_materialized_oof_rows,
+            "max_model_fits": max_model_fits,
+        }
+        build = load_production_build_manifest(build_manifest)
+        expected = create_campaign_manifest(
+            build_id=build.build_id,
+            build_manifest_path=build_manifest,
+            code_commit=code_commit,
+            report_root=report_root,
+            experiment_registry=experiment_registry,
+            horizons=horizon_values,
+            model_families=family_values,
+            common_config=common_config,
+        )
+        if campaign_manifest.exists():
+            manifest = load_campaign_manifest(campaign_manifest)
+            if manifest.campaign_id != expected.campaign_id:
+                raise ValueError(
+                    "campaign manifest plan differs from requested configuration; "
+                    "use a different manifest path"
+                )
+            manifest = reconcile_campaign(manifest)
+            active = [
+                batch.batch_id
+                for batch in manifest.batches
+                if batch.status is CampaignBatchStatus.RUNNING
+            ]
+            if active:
+                raise RuntimeError(
+                    "campaign child is still running: " + ", ".join(active)
+                )
+        else:
+            manifest = expected
+        write_campaign_manifest(manifest, campaign_manifest)
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(f"research campaign blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    log_root.mkdir(parents=True, exist_ok=True)
+    for batch in manifest.batches:
+        if batch.status is CampaignBatchStatus.SUCCEEDED:
+            typer.echo(f"batch={batch.batch_id} status=SUCCEEDED action=skip")
+            continue
+        batch.attempts += 1
+        batch.status = CampaignBatchStatus.RUNNING
+        batch.started_at = datetime.now(UTC)
+        batch.completed_at = None
+        batch.last_error = None
+        batch.report_id = None
+        batch.oof_path = None
+        log_path = (log_root / f"{batch.batch_id}.attempt-{batch.attempts}.log").resolve()
+        batch.log_path = str(log_path)
+        command = _advanced_campaign_child_command(
+            build_manifest=Path(manifest.build_manifest_path),
+            code_commit=manifest.code_commit,
+            report_root=Path(manifest.report_root),
+            experiment_registry=Path(manifest.experiment_registry),
+            horizon=batch.horizon,
+            model_family=batch.model_family,
+            common_config=manifest.common_config,
+        )
+        typer.echo(f"batch={batch.batch_id} status=RUNNING attempt={batch.attempts} log={log_path}")
+        with log_path.open("a", encoding="utf-8") as stream:
+            process = subprocess.Popen(
+                command,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                cwd=Path.cwd(),
+                text=True,
+            )
+            batch.child_pid = process.pid
+            write_campaign_manifest(manifest, campaign_manifest)
+            try:
+                return_code = process.wait()
+            except KeyboardInterrupt:
+                process.terminate()
+                process.wait(timeout=30)
+                batch.status = CampaignBatchStatus.INTERRUPTED
+                batch.child_pid = None
+                batch.completed_at = datetime.now(UTC)
+                batch.last_error = "campaign interrupted by operator"
+                write_campaign_manifest(manifest, campaign_manifest)
+                typer.echo(f"batch={batch.batch_id} status=INTERRUPTED", err=True)
+                raise typer.Exit(code=130) from None
+        batch.child_pid = None
+        try:
+            reconcile_campaign(manifest)
+        except (ValueError, RuntimeError, OSError) as exc:
+            batch.last_error = str(exc)[:500]
+        if return_code == 0 and batch.status is CampaignBatchStatus.SUCCEEDED:
+            write_campaign_manifest(manifest, campaign_manifest)
+            typer.echo(f"batch={batch.batch_id} status=SUCCEEDED report={batch.report_id}")
+            continue
+        batch.status = CampaignBatchStatus.FAILED
+        batch.completed_at = datetime.now(UTC)
+        batch.last_error = batch.last_error or f"advanced child exit code {return_code}"
+        write_campaign_manifest(manifest, campaign_manifest)
+        typer.echo(
+            f"batch={batch.batch_id} status=FAILED reason={batch.last_error} log={log_path}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    typer.echo(f"campaign={manifest.campaign_id} status=SUCCEEDED batches={len(manifest.batches)}")
+
+
+def _advanced_campaign_child_command(
+    *,
+    build_manifest: Path,
+    code_commit: str,
+    report_root: Path,
+    experiment_registry: Path,
+    horizon: int,
+    model_family: str,
+    common_config: Mapping[str, object],
+) -> list[str]:
+    bool_options = {
+        "run_ablations": bool(common_config["run_ablations"]),
+        "run_diagnostics": bool(common_config["run_diagnostics"]),
+    }
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import sys; "
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r}); "
+            "from stock_ai.cli import app; app()"
+        ),
+        "research",
+        "advanced",
+        "--build-manifest",
+        str(build_manifest.resolve()),
+        "--code-commit",
+        code_commit,
+        "--report-root",
+        str(report_root.resolve()),
+        "--experiment-registry",
+        str(experiment_registry.resolve()),
+        "--horizons",
+        str(horizon),
+        "--model-families",
+        model_family,
+        "--target-family",
+        str(common_config["target_family"]),
+        "--seeds",
+        ",".join(str(seed) for seed in cast(tuple[int, ...], common_config["seeds"])),
+    ]
+    for name in (
+        "tuning_trials",
+        "tuning_timeout_seconds",
+        "estimator_count",
+        "initial_train_periods",
+        "validation_periods",
+        "step_periods",
+        "holdout_periods",
+        "max_materialized_oof_rows",
+        "max_model_fits",
+    ):
+        command.extend((f"--{name.replace('_', '-')}", str(common_config[name])))
+    for name, enabled in bool_options.items():
+        option = name.replace("_", "-")
+        command.append(f"--{option}" if enabled else f"--no-{option}")
+    return command
 
 
 def _advanced_experiment_record(

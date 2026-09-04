@@ -483,3 +483,11 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - 実データで市場区分開始境界、provider code優先株衝突、no-trade行、UTC精度、全欠損lineage、一括feature copy、Parquet物理dtype hash、Build全frame同時保持を修正。旧物理dtype hash bundle 4.77GBは削除せず`artifacts/quarantine/production-physical-hash-v1-20260830`へ隔離した
 - locked final holdoutにはまだ一度もアクセスしていない。Goal 3の全model / feature / hyperparameter / ensemble weight選択をdevelopment期間だけで完了してから単回評価する
 - Goal 2 live acceptance後の全品質gateはRuff / mypy strict（43 source files）/ pytest 195件 / branch coverage 85% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がすべてpass。実データ`data verify`も26,030 object、3 feature snapshot、1 dataset snapshot、1 buildで再度`OK`
+
+## 2026-09-04 Goal 3実データ研究の中断安全化
+
+- 2026-08-30 12:37 JST開始の旧monolithic runは、5日horizonで3 model family、4 task、Optuna、F0〜F12 ablation、diagnosticsを一processへ詰め、12時間超の計算後にhost session終了で停止した。content-addressed advanced reportは未公開、Experiment Registryの成功記録もなく、locked holdoutにはアクセスしていない
+- D060の既存方針を実運用化し、`stock-ai research campaign`を追加した。`1 horizon × 1 model family`ごとに独立process、content-addressed report、append-only Experiment Registry、atomic resume manifest、attempt別logを持つ
+- 再開時は保存済みartifactをhash / identity / config / commitまで再認証し、成功分をskipする。report公開直後の親停止はartifactから回復し、停止済み`RUNNING`だけを`INTERRUPTED`として再実行する。生存中childは二重起動しない
+- API keyはcampaign command / manifest / logへ含めない。campaignとlogはGit対象外、実験結果は既存の認証済みartifact境界とExperiment Registryへ保存する
+- 旧runの失敗理由はresource scaleと中断粒度であり、model成績による棄却ではない。development選択は新campaignの完了結果だけから行い、全選択固定までlocked holdoutを開かない
