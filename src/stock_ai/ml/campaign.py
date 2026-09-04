@@ -10,6 +10,7 @@ import tempfile
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -31,6 +32,7 @@ class ResearchCampaignBatch(BaseModel):
     horizon: int
     model_family: str = Field(min_length=1)
     config_hash: str = Field(min_length=64, max_length=64)
+    feature_names_hash: str = Field(min_length=64, max_length=64)
     status: CampaignBatchStatus = CampaignBatchStatus.PENDING
     attempts: int = Field(default=0, ge=0)
     started_at: datetime | None = None
@@ -86,9 +88,14 @@ def create_campaign_manifest(
     batches: list[ResearchCampaignBatch] = []
     for horizon in horizons:
         for family in model_families:
+            feature_names = tuple(
+                str(name) for name in cast(tuple[object, ...], common_config["feature_names"])
+            )
             config = AdvancedResearchConfig.model_validate(
                 {
-                    **common_config,
+                    **{
+                        key: value for key, value in common_config.items() if key != "feature_names"
+                    },
                     "horizons": (horizon,),
                     "model_families": (family,),
                 }
@@ -99,6 +106,7 @@ def create_campaign_manifest(
                     horizon=horizon,
                     model_family=family,
                     config_hash=config.config_hash,
+                    feature_names_hash=_stable_hash(feature_names),
                 )
             )
     plan_id = _campaign_plan_identity(
@@ -164,6 +172,7 @@ def _campaign_plan_identity(
                 "horizon": batch.horizon,
                 "model_family": batch.model_family,
                 "config_hash": batch.config_hash,
+                "feature_names_hash": batch.feature_names_hash,
             }
             for batch in batches
         ],
@@ -222,6 +231,8 @@ def authenticate_batch_artifact(
         raise RuntimeError("research campaign batch horizon mismatch")
     if report.config.model_families != (batch.model_family,):
         raise RuntimeError("research campaign batch model family mismatch")
+    if _stable_hash(report.feature_names) != batch.feature_names_hash:
+        raise RuntimeError("research campaign batch feature names mismatch")
     return report.report_id, str(oof_path.resolve())
 
 
@@ -299,3 +310,8 @@ def _process_is_running(pid: int) -> bool:
     except (OSError, ProcessLookupError):
         return False
     return True
+
+
+def _stable_hash(value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(payload).hexdigest()

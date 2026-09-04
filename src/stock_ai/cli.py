@@ -952,6 +952,10 @@ def research_advanced(
         str,
         typer.Option(help="Comma-separated lightgbm,xgboost,catboost."),
     ] = "lightgbm",
+    feature_names: Annotated[
+        str,
+        typer.Option(help="Comma-separated authenticated V2 feature subset; empty means all V2."),
+    ] = "",
     seeds: Annotated[
         str,
         typer.Option(help="Comma-separated deterministic seeds."),
@@ -1017,6 +1021,7 @@ def research_advanced(
         "horizons": horizons,
         "target_family": target_family,
         "model_families": model_families,
+        "feature_names": feature_names,
         "seeds": seeds,
         "tuning_trials": tuning_trials,
         "tuning_timeout_seconds": tuning_timeout_seconds,
@@ -1054,6 +1059,27 @@ def research_advanced(
                 "max_model_fits": max_model_fits,
             }
         )
+        requested_feature_names = tuple(
+            value.strip() for value in feature_names.split(",") if value.strip()
+        )
+        if len(requested_feature_names) != len(set(requested_feature_names)):
+            raise ValueError("feature names must be unique")
+        unknown_feature_names = sorted(
+            set(requested_feature_names) - set(V2_EXTENDED_MANIFEST.feature_names)
+        )
+        if unknown_feature_names:
+            raise ValueError(
+                "feature names are outside authenticated V2: " + ", ".join(unknown_feature_names)
+            )
+        selected_feature_names = (
+            tuple(
+                name
+                for name in V2_EXTENDED_MANIFEST.feature_names
+                if name in set(requested_feature_names)
+            )
+            if requested_feature_names
+            else V2_EXTENDED_MANIFEST.feature_names
+        )
         build = load_production_build_manifest(build_manifest)
         authenticated_build_id = build.build_id
         # The authenticated Build Manifest already verifies the V2 snapshot.  Loading the
@@ -1070,6 +1096,7 @@ def research_advanced(
             config=config,
             feature_snapshot_id=v2_snapshot.snapshot_id,
             feature_manifest_hash=v2_snapshot.manifest_hash,
+            feature_names=selected_feature_names,
         )
         metadata_path, oof_path = write_advanced_research_run(run, report_root)
         # Read through the authenticated boundary before declaring publication complete.
@@ -1155,6 +1182,10 @@ def research_campaign(
         str,
         typer.Option(help="Comma-separated lightgbm,xgboost,catboost; each is a separate batch."),
     ] = "lightgbm,xgboost,catboost",
+    feature_names: Annotated[
+        str,
+        typer.Option(help="Comma-separated authenticated V2 feature subset; empty means all V2."),
+    ] = "",
     seeds: Annotated[
         str,
         typer.Option(help="Comma-separated deterministic seeds used inside each batch."),
@@ -1230,6 +1261,27 @@ def research_campaign(
         horizon_values = tuple(int(value.strip()) for value in horizons.split(",") if value.strip())
         family_values = tuple(value.strip() for value in model_families.split(",") if value.strip())
         seed_values = tuple(int(value.strip()) for value in seeds.split(",") if value.strip())
+        requested_feature_names = tuple(
+            value.strip() for value in feature_names.split(",") if value.strip()
+        )
+        if len(requested_feature_names) != len(set(requested_feature_names)):
+            raise ValueError("feature names must be unique")
+        unknown_feature_names = sorted(
+            set(requested_feature_names) - set(V2_EXTENDED_MANIFEST.feature_names)
+        )
+        if unknown_feature_names:
+            raise ValueError(
+                "feature names are outside authenticated V2: " + ", ".join(unknown_feature_names)
+            )
+        selected_feature_names = (
+            tuple(
+                name
+                for name in V2_EXTENDED_MANIFEST.feature_names
+                if name in set(requested_feature_names)
+            )
+            if requested_feature_names
+            else V2_EXTENDED_MANIFEST.feature_names
+        )
         common_config: dict[str, object] = {
             "target_family": target_family,
             "seeds": seed_values,
@@ -1244,6 +1296,7 @@ def research_campaign(
             "run_diagnostics": run_diagnostics,
             "max_materialized_oof_rows": max_materialized_oof_rows,
             "max_model_fits": max_model_fits,
+            "feature_names": selected_feature_names,
         }
         build = load_production_build_manifest(build_manifest)
         expected = create_campaign_manifest(
@@ -1385,6 +1438,8 @@ def _advanced_campaign_child_command(
         str(common_config["target_family"]),
         "--seeds",
         ",".join(str(seed) for seed in cast(tuple[int, ...], common_config["seeds"])),
+        "--feature-names",
+        ",".join(str(name) for name in cast(tuple[str, ...], common_config["feature_names"])),
     ]
     for name in (
         "tuning_trials",

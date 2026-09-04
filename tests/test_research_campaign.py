@@ -43,6 +43,7 @@ def _manifest(tmp_path: Path):  # type: ignore[no-untyped-def]
             "run_diagnostics": False,
             "max_materialized_oof_rows": 10_000,
             "max_model_fits": 100,
+            "feature_names": ("return_1d",),
         },
         now=datetime(2026, 9, 4, tzinfo=UTC),
     )
@@ -57,6 +58,7 @@ def test_campaign_manifest_is_atomic_round_trip_and_plan_authenticated(tmp_path:
         "h5-xgboost",
     ]
     assert all(batch.status is CampaignBatchStatus.PENDING for batch in manifest.batches)
+    assert all(len(batch.feature_names_hash) == 64 for batch in manifest.batches)
 
     path = tmp_path / "campaign.json"
     write_campaign_manifest(manifest, path)
@@ -134,6 +136,7 @@ def test_reconcile_authenticates_existing_result(
         config_hash=batch.config_hash,
         code_commit=manifest.code_commit,
         config=SimpleNamespace(horizons=(1,), model_families=("lightgbm",)),
+        feature_names=("return_1d",),
     )
     monkeypatch.setattr(
         "stock_ai.ml.campaign.load_advanced_research_run", lambda _path: (report, object())
@@ -156,6 +159,7 @@ def test_batch_authentication_rejects_provenance_mismatch(
         config_hash="wrong",
         code_commit=manifest.code_commit,
         config=SimpleNamespace(horizons=(1,), model_families=("lightgbm",)),
+        feature_names=("return_1d",),
     )
     monkeypatch.setattr(
         "stock_ai.ml.campaign.load_advanced_research_run", lambda _path: (report, object())
@@ -287,3 +291,26 @@ def test_campaign_cli_rejects_manifest_for_different_plan(
     )
     assert result.exit_code == 2
     assert "plan differs" in result.stderr
+
+
+def test_campaign_cli_rejects_feature_outside_authenticated_v2(tmp_path: Path) -> None:
+    build_manifest = tmp_path / "build.json"
+    build_manifest.touch()
+    result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "campaign",
+            "--build-manifest",
+            str(build_manifest),
+            "--code-commit",
+            "abc1234",
+            "--feature-names",
+            "definitely_not_a_v2_feature",
+            "--campaign-manifest",
+            str(tmp_path / "campaign.json"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "outside authenticated V2" in result.stderr
+    assert not (tmp_path / "campaign.json").exists()

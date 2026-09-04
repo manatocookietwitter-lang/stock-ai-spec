@@ -635,8 +635,8 @@ Parquet file SHA-256とmetadata hashも従来どおり必須とし、logical con
 
 full JPXのadvanced researchは、`horizon × model family`を最小保存単位にする。各batchは独立subprocessで実行し、
 成功時だけ既存のcontent-addressed report / OOF bundleとappend-only Experiment Registryを公開する。campaign側は
-plan identity、config hash、attempt、child PID、log、report identityを小さなatomic manifestへ保存する。再開時は
-manifestの`SUCCEEDED`表示だけを信用せず、OOF Parquet、metadata hash、report identity、config hash、commitを再認証する。
+plan identity、config hash、feature name hash、attempt、child PID、log、report identityを小さなatomic manifestへ保存する。再開時は
+manifestの`SUCCEEDED`表示だけを信用せず、OOF Parquet、metadata hash、report identity、config hash、feature名、commitを再認証する。
 親processがartifact公開後かつmanifest更新前に停止した場合はreport rootから同一configを再発見し、未完了batchだけを
 再実行する。生存中childの重複起動は拒否し、停止済み`RUNNING`は`INTERRUPTED`へ移す。API keyはcommand、manifest、
 logへ渡さない。
