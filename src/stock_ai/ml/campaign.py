@@ -214,6 +214,32 @@ def load_campaign_manifest(path: Path) -> ResearchCampaignManifest:
     return ResearchCampaignManifest.model_validate(payload)
 
 
+def load_campaign_build_id(manifest_path: Path) -> str:
+    """Authenticate the small build marker; each child authenticates all Parquet content."""
+
+    manifest_path = manifest_path.resolve()
+    build_id = manifest_path.stem
+    if len(build_id) != 64 or manifest_path.parent.name != build_id:
+        raise RuntimeError("production build path is not content-addressed")
+    try:
+        observed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise RuntimeError("production build manifest is missing or invalid") from None
+    if not isinstance(observed, dict) or observed.get("build_id") != build_id:
+        raise RuntimeError("production build identity mismatch")
+    if Path(str(observed.get("manifest_path", ""))).resolve() != manifest_path:
+        raise RuntimeError("production build manifest path metadata mismatch")
+    metadata = {key: value for key, value in observed.items() if key != "metadata_hash"}
+    metadata_hash = hashlib.sha256(
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    if observed.get("metadata_hash") != metadata_hash:
+        raise RuntimeError("production build metadata hash mismatch")
+    return build_id
+
+
 def authenticate_batch_artifact(
     batch: ResearchCampaignBatch,
     *,

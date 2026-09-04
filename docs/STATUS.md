@@ -491,4 +491,5 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - 再開時は保存済みartifactをhash / identity / config / commitまで再認証し、成功分をskipする。report公開直後の親停止はartifactから回復し、停止済み`RUNNING`だけを`INTERRUPTED`として再実行する。生存中childは二重起動しない
 - ablation後の選択済みfeature subsetを同じbatch境界で再学習できるようにし、V2外・重複featureを拒否してfeature名hashもresume認証へ含めた
 - API keyは不要な研究childの環境から除去し、campaign command / manifest / logへも含めない。campaignとlogはGit対象外、実験結果は既存の認証済みartifact境界とExperiment Registryへ保存する
+- 親processはBuild markerのidentity / metadata hashを軽量認証してmanifestを先に保存し、各batch childが全Parquet内容を実行直前に完全認証する。model開始前の約20分間にresume状態が存在しない実測上の穴を塞いだ
 - 旧runの失敗理由はresource scaleと中断粒度であり、model成績による棄却ではない。development選択は新campaignの完了結果だけから行い、全選択固定までlocked holdoutを開かない

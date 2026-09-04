@@ -640,3 +640,7 @@ manifestの`SUCCEEDED`表示だけを信用せず、OOF Parquet、metadata hash�
 親processがartifact公開後かつmanifest更新前に停止した場合はreport rootから同一configを再発見し、未完了batchだけを
 再実行する。生存中childの重複起動は拒否し、停止済み`RUNNING`は`INTERRUPTED`へ移す。研究childから不要な
 `JQUANTS_API_KEY`環境変数を除去し、command、manifest、logへも渡さない。
+
+campaign親はcontent-addressed Build marker自体のidentity / metadata hashだけを軽量認証して、resume manifestを即時公開する。
+各batch childは開始時に従来どおり全feature / Dataset Parquet内容まで完全認証する。これにより長い事前認証中の親停止でも
+campaignの現在地を失わず、Parquet完全性を省略しない。

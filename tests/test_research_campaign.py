@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from stock_ai.ml.campaign import (
     authenticate_batch_artifact,
     create_campaign_manifest,
     discover_batch_artifact,
+    load_campaign_build_id,
     load_campaign_manifest,
     reconcile_campaign,
     write_campaign_manifest,
@@ -80,6 +82,27 @@ def test_campaign_manifest_missing_or_invalid_is_fail_closed(tmp_path: Path) -> 
     invalid.write_text("not-json", encoding="utf-8")
     with pytest.raises(RuntimeError, match="missing or invalid"):
         load_campaign_manifest(invalid)
+
+
+def test_campaign_build_marker_is_authenticated_without_loading_parquet(tmp_path: Path) -> None:
+    build_id = "b" * 64
+    directory = tmp_path / build_id
+    directory.mkdir()
+    path = (directory / f"{build_id}.json").resolve()
+    payload = {"build_id": build_id, "manifest_path": str(path), "dataset": "metadata-only"}
+    payload["metadata_hash"] = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_campaign_build_id(path) == build_id
+
+    payload["dataset"] = "tampered"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="metadata hash mismatch"):
+        load_campaign_build_id(path)
 
 
 def test_reconcile_marks_stale_running_batch_interrupted(tmp_path: Path) -> None:
@@ -223,10 +246,7 @@ def test_campaign_cli_runs_batches_and_persists_success(
 ) -> None:
     build_manifest = tmp_path / "build.json"
     build_manifest.touch()
-    monkeypatch.setattr(
-        "stock_ai.cli.load_production_build_manifest",
-        lambda _path: SimpleNamespace(build_id="b" * 64),
-    )
+    monkeypatch.setattr("stock_ai.cli.load_campaign_build_id", lambda _path: "b" * 64)
     monkeypatch.setattr("stock_ai.cli.subprocess.Popen", _CompletedProcess)
     monkeypatch.setenv("JQUANTS_API_KEY", "must-not-reach-research-child")
 
@@ -278,10 +298,7 @@ def test_campaign_cli_rejects_manifest_for_different_plan(
 ) -> None:
     build_manifest = tmp_path / "build.json"
     build_manifest.touch()
-    monkeypatch.setattr(
-        "stock_ai.cli.load_production_build_manifest",
-        lambda _path: SimpleNamespace(build_id="b" * 64),
-    )
+    monkeypatch.setattr("stock_ai.cli.load_campaign_build_id", lambda _path: "b" * 64)
     campaign_path = tmp_path / "campaign.json"
     write_campaign_manifest(_manifest(tmp_path), campaign_path)
     result = CliRunner().invoke(

@@ -120,6 +120,7 @@ from stock_ai.ml import (
 from stock_ai.ml.campaign import (
     CampaignBatchStatus,
     create_campaign_manifest,
+    load_campaign_build_id,
     load_campaign_manifest,
     reconcile_campaign,
     write_campaign_manifest,
@@ -1299,9 +1300,9 @@ def research_campaign(
             "max_model_fits": max_model_fits,
             "feature_names": selected_feature_names,
         }
-        build = load_production_build_manifest(build_manifest)
+        build_id = load_campaign_build_id(build_manifest)
         expected = create_campaign_manifest(
-            build_id=build.build_id,
+            build_id=build_id,
             build_manifest_path=build_manifest,
             code_commit=code_commit,
             report_root=report_root,
