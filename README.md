@@ -152,6 +152,17 @@ stock-ai research baseline --dataset-parquet <content-addressed-parquet> --code-
 stock-ai research advanced --build-manifest <production-build-manifest.json> --code-commit <commit>
 ```
 
+長時間の新規research campaignは、既定で`model × horizon × seed` batch、永続Optuna study、
+content-addressed walk-forward fold checkpointを使う。granular checkpoint directoryはcampaign manifestへ固定し、
+次のread-only commandで照会する。
+
+```text
+stock-ai research checkpoint-status --checkpoint-path <content-addressed-checkpoint-directory>
+```
+
+完了済みfold / trialは全identityとhashが一致する場合だけ再利用する。不一致、欠損、改ざん時はfail closedし、
+locked holdoutをdevelopment resumeへ混ぜない。
+
 Free planの既定取得は銘柄master、株価日足、財務summary。Light以上の営業日calendarとTOPIXは`--datasets`で明示する。live取得はprocess環境の`JQUANTS_API_KEY`がない場合に停止し、fixtureへfallbackしない。
 
 株価はexecution参照用raw系列とresearch用調整系列を分け、同じpayloadの再取得は重複させない。訂正値は新versionとして残す。APIが過去訂正時刻を返さないためsource objectは`available_at = received_at`とし、初回取得より前の時点へbackfill値を遡及させない。as-revised単一vintageは研究専用かつ採用不可として明示し、V0/V1/V2/Datasetはsource-frame ID付きのatomic Build Manifestで固定する。詳細は`docs/JQUANTS_V2_RUNBOOK.md`を参照する。

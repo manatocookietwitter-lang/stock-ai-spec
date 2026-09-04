@@ -674,3 +674,23 @@ development campaignと別の明示入口まで禁止する。
 行わない。statusは保存状態とworker identityから求めたeffective状態を表示するだけでmanifestを書き換えない。
 fold / Optuna trial単位の永続再利用は、動作中batchのsourceを変更せずに移行できる境界で追加する。それまでは
 D070の`horizon × model family`成功artifactを最小再利用単位とし、既存1日model成果物と失敗監査を削除しない。
+
+### D073 — 新規Goal 3 campaignはseed / fold / Optuna trialを認証付きで永続化する
+
+D072の独立campaign完了後に開始する新規研究は`research-campaign-manifest-v2`を使い、batchを
+`model family × horizon × seed`へ分割する。各batch内のwalk-forward foldは、Production Dataset ID、
+Feature snapshot / manifest hash、順序付きfeature名、研究code commit、config全文/hash、target、model task、
+parameter、seed、fold番号、train / validation index hashと期間を一つのidentityへ固定する。成功foldだけを
+content-addressed Parquet + metadataとしてatomic publishし、Parquet / logical frame / metadata hashをすべて
+再認証できた場合だけ再利用する。成功表示に対応するartifact欠損・改ざん・identity不一致は再計算で隠さず
+fail closedする。
+
+fold開始前に小さなatomic progress manifestへ`RUNNING`を記録し、同じcheckpointのOS排他lockを新workerが
+取得した時に残存`RUNNING`を`INTERRUPTED`へ移す。成功artifact公開後かつprogress更新前の停止は、artifactを
+再認証して`SUCCEEDED`へ回復する。progress照会はread-only commandとし、workerを起動・停止しない。
+
+Optuna studyは同じcheckpoint namespaceのSQLiteへ永続化し、study user attributesにdataset / feature / code /
+config / horizon / family / seed identityを固定する。再開時は完了済み`COMPLETE / PRUNED / FAIL` trialを再試行せず、
+残trial数と累積実行時間だけを元のtrial / timeout上限内で実行する。停止時に残った`RUNNING` trialは、外側の
+single-worker lock取得後だけ`FAIL`へ遷移する。SQLite破損、study provenance欠落・不一致は新studyへ黙って
+fallbackせず停止する。development checkpointはlocked holdout rowを含まず、holdout評価入口とは分離する。

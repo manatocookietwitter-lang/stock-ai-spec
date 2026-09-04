@@ -103,6 +103,7 @@ from stock_ai.ml import (
     load_production_dataset_snapshot,
     load_production_feature_snapshot,
     load_production_feature_snapshot_metadata,
+    read_checkpoint_status,
     reserve_locked_final_holdout,
     run_advanced_research,
     run_morning_research,
@@ -1010,6 +1011,10 @@ def research_advanced(
         Path,
         typer.Option(help="Append-only success/failure experiment registry."),
     ] = Path("artifacts/experiments/advanced.jsonl"),
+    checkpoint_root: Annotated[
+        Path,
+        typer.Option(help="Authenticated fold and persistent Optuna checkpoint root."),
+    ] = Path("artifacts/checkpoints/advanced"),
 ) -> None:
     """Run leakage-safe GBDT/LTR/downside/OOF research; never open the holdout."""
 
@@ -1099,6 +1104,7 @@ def research_advanced(
             feature_snapshot_id=v2_snapshot.snapshot_id,
             feature_manifest_hash=v2_snapshot.manifest_hash,
             feature_names=selected_feature_names,
+            checkpoint_root=checkpoint_root,
         )
         metadata_path, oof_path = write_advanced_research_run(run, report_root)
         # Read through the authenticated boundary before declaring publication complete.
@@ -1178,11 +1184,11 @@ def research_campaign(
     code_commit: Annotated[str, typer.Option(help="Exact source commit for audit provenance.")],
     horizons: Annotated[
         str,
-        typer.Option(help="Comma-separated subset of 1,5,20; each is a separate batch."),
+        typer.Option(help="Comma-separated subset of 1,5,20; each is a batch dimension."),
     ] = "1,5,20",
     model_families: Annotated[
         str,
-        typer.Option(help="Comma-separated lightgbm,xgboost,catboost; each is a separate batch."),
+        typer.Option(help="Comma-separated lightgbm,xgboost,catboost batch dimensions."),
     ] = "lightgbm,xgboost,catboost",
     feature_names: Annotated[
         str,
@@ -1190,7 +1196,7 @@ def research_campaign(
     ] = "",
     seeds: Annotated[
         str,
-        typer.Option(help="Comma-separated deterministic seeds used inside each batch."),
+        typer.Option(help="Comma-separated deterministic seeds; each is a separate batch."),
     ] = "17",
     target_family: Annotated[
         str,
@@ -1252,12 +1258,16 @@ def research_campaign(
         Path,
         typer.Option(help="Append-only success/failure experiment registry."),
     ] = Path("artifacts/experiments/advanced.jsonl"),
+    checkpoint_root: Annotated[
+        Path,
+        typer.Option(help="Authenticated per-fold and persistent Optuna checkpoint root."),
+    ] = Path("artifacts/checkpoints/advanced"),
     log_root: Annotated[
         Path,
         typer.Option(help="Per-attempt child logs; contains no credentials."),
     ] = Path("artifacts/logs/goal3"),
 ) -> None:
-    """Resume Goal 3 as authenticated horizon/model-family subprocess batches."""
+    """Resume Goal 3 as authenticated model-family/horizon/seed subprocess batches."""
 
     try:
         horizon_values = tuple(int(value.strip()) for value in horizons.split(",") if value.strip())
@@ -1310,6 +1320,7 @@ def research_campaign(
             horizons=horizon_values,
             model_families=family_values,
             common_config=common_config,
+            checkpoint_root=checkpoint_root,
         )
         if campaign_manifest.exists():
             manifest = load_campaign_manifest(campaign_manifest)
@@ -1355,6 +1366,12 @@ def research_campaign(
             horizon=batch.horizon,
             model_family=batch.model_family,
             common_config=manifest.common_config,
+            seed=batch.seed,
+            checkpoint_root=(
+                None
+                if manifest.checkpoint_root is None
+                else Path(manifest.checkpoint_root)
+            ),
         )
         typer.echo(f"batch={batch.batch_id} status=RUNNING attempt={batch.attempts} log={log_path}")
         with log_path.open("a", encoding="utf-8") as stream:
@@ -1403,6 +1420,27 @@ def research_campaign(
     typer.echo(f"campaign={manifest.campaign_id} status=SUCCEEDED batches={len(manifest.batches)}")
 
 
+@research_app.command("checkpoint-status")
+def research_checkpoint_status(
+    checkpoint_path: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=False,
+            help="Exact content-addressed granular checkpoint directory.",
+        ),
+    ],
+) -> None:
+    """Read authenticated fold progress without changing worker or manifest state."""
+
+    try:
+        status = read_checkpoint_status(checkpoint_path)
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(f"research checkpoint status blocked: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(json.dumps(status, ensure_ascii=False, sort_keys=True))
+
+
 def _advanced_campaign_child_command(
     *,
     build_manifest: Path,
@@ -1412,6 +1450,8 @@ def _advanced_campaign_child_command(
     horizon: int,
     model_family: str,
     common_config: Mapping[str, object],
+    seed: int | None = None,
+    checkpoint_root: Path | None = None,
 ) -> list[str]:
     bool_options = {
         "run_ablations": bool(common_config["run_ablations"]),
@@ -1442,7 +1482,14 @@ def _advanced_campaign_child_command(
         "--target-family",
         str(common_config["target_family"]),
         "--seeds",
-        ",".join(str(seed) for seed in cast(tuple[int, ...], common_config["seeds"])),
+        (
+            str(seed)
+            if seed is not None
+            else ",".join(
+                str(seed_value)
+                for seed_value in cast(tuple[int, ...], common_config["seeds"])
+            )
+        ),
         "--feature-names",
         ",".join(str(name) for name in cast(tuple[str, ...], common_config["feature_names"])),
     ]
@@ -1461,6 +1508,8 @@ def _advanced_campaign_child_command(
     for name, enabled in bool_options.items():
         option = name.replace("_", "-")
         command.append(f"--{option}" if enabled else f"--no-{option}")
+    if checkpoint_root is not None:
+        command.extend(("--checkpoint-root", str(checkpoint_root.resolve())))
     return command
 
 

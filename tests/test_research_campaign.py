@@ -224,6 +224,63 @@ def test_campaign_child_command_contains_no_credentials(tmp_path: Path) -> None:
     assert "from stock_ai.cli import app; app()" in command[2]
 
 
+def test_v2_campaign_splits_every_seed_and_authenticates_child_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    legacy = _manifest(tmp_path)
+    manifest = create_campaign_manifest(
+        build_id=legacy.build_id,
+        build_manifest_path=Path(legacy.build_manifest_path),
+        code_commit=legacy.code_commit,
+        report_root=Path(legacy.report_root),
+        experiment_registry=Path(legacy.experiment_registry),
+        horizons=(1,),
+        model_families=("lightgbm",),
+        common_config={**legacy.common_config, "seeds": (17, 29)},
+        checkpoint_root=tmp_path / "checkpoints",
+        now=datetime(2026, 9, 4, tzinfo=UTC),
+    )
+    assert manifest.schema_version == "research-campaign-manifest-v2"
+    assert [batch.batch_id for batch in manifest.batches] == [
+        "h1-lightgbm-s17",
+        "h1-lightgbm-s29",
+    ]
+    assert [batch.seed for batch in manifest.batches] == [17, 29]
+    batch = manifest.batches[1]
+    command = _advanced_campaign_child_command(
+        build_manifest=Path(manifest.build_manifest_path),
+        code_commit=manifest.code_commit,
+        report_root=Path(manifest.report_root),
+        experiment_registry=Path(manifest.experiment_registry),
+        horizon=batch.horizon,
+        model_family=batch.model_family,
+        common_config=manifest.common_config,
+        seed=batch.seed,
+        checkpoint_root=Path(str(manifest.checkpoint_root)),
+    )
+    assert command[command.index("--seeds") + 1] == "29"
+    assert command[command.index("--checkpoint-root") + 1] == str(
+        (tmp_path / "checkpoints").resolve()
+    )
+
+    report = SimpleNamespace(
+        report_id="r" * 64,
+        config_hash=batch.config_hash,
+        code_commit=manifest.code_commit,
+        config=SimpleNamespace(horizons=(1,), model_families=("lightgbm",), seeds=(17,)),
+        feature_names=("return_1d",),
+    )
+    monkeypatch.setattr(
+        "stock_ai.ml.campaign.load_advanced_research_run", lambda _path: (report, object())
+    )
+    with pytest.raises(RuntimeError, match="seed mismatch"):
+        authenticate_batch_artifact(
+            batch,
+            code_commit=manifest.code_commit,
+            oof_path=tmp_path / "oof.parquet",
+        )
+
+
 class _CompletedProcess:
     last_environment: dict[str, str] | None = None
 

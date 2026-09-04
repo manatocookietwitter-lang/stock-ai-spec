@@ -20,6 +20,7 @@ from stock_ai.ml.advanced import (
     run_advanced_research,
     write_advanced_research_run,
 )
+from stock_ai.ml.checkpoint import ResearchCheckpointStore, read_checkpoint_status
 from stock_ai.ml.dataset import DatasetSnapshot, build_supervised_dataset, write_dataset_snapshot
 from stock_ai.ml.models import BaselinePredictionBundle, MomentumRegressor, RidgeRegressor
 from stock_ai.ml.morning import (
@@ -99,6 +100,7 @@ __all__ = [
     "ProductionFeatureSets",
     "ProductionFeatureSnapshot",
     "PurgedExpandingWindowSplitter",
+    "ResearchCheckpointStore",
     "RidgeRegressor",
     "SeedStability",
     "TrialAudit",
@@ -123,6 +125,7 @@ __all__ = [
     "load_production_feature_snapshot",
     "load_production_feature_snapshot_metadata",
     "propose_from_morning_batch",
+    "read_checkpoint_status",
     "reserve_locked_final_holdout",
     "run_advanced_research",
     "run_morning_research",

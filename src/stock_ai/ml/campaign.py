@@ -31,6 +31,7 @@ class ResearchCampaignBatch(BaseModel):
     batch_id: str = Field(min_length=1)
     horizon: int
     model_family: str = Field(min_length=1)
+    seed: int | None = None
     config_hash: str = Field(min_length=64, max_length=64)
     feature_names_hash: str = Field(min_length=64, max_length=64)
     status: CampaignBatchStatus = CampaignBatchStatus.PENDING
@@ -56,6 +57,7 @@ class ResearchCampaignManifest(BaseModel):
     code_commit: str = Field(min_length=1)
     report_root: str = Field(min_length=1)
     experiment_registry: str = Field(min_length=1)
+    checkpoint_root: str | None = None
     common_config: dict[str, object]
     created_at: datetime
     updated_at: datetime
@@ -67,6 +69,11 @@ class ResearchCampaignManifest(BaseModel):
             raise ValueError("research campaign batch IDs must be unique")
         if self.campaign_id != campaign_identity(self):
             raise ValueError("research campaign identity mismatch")
+        if self.schema_version == "research-campaign-manifest-v2":
+            if self.checkpoint_root is None or any(batch.seed is None for batch in self.batches):
+                raise ValueError("v2 campaign requires checkpoint root and per-seed batches")
+        elif self.schema_version != "research-campaign-manifest-v1":
+            raise ValueError("unsupported research campaign schema")
         return self
 
 
@@ -80,37 +87,57 @@ def create_campaign_manifest(
     horizons: tuple[int, ...],
     model_families: tuple[str, ...],
     common_config: dict[str, object],
+    checkpoint_root: Path | None = None,
     now: datetime | None = None,
 ) -> ResearchCampaignManifest:
-    """Create one independently recoverable batch per horizon and model family."""
+    """Create recoverable batches, optionally split down to one deterministic seed."""
 
     timestamp = now or datetime.now(UTC)
     batches: list[ResearchCampaignBatch] = []
+    seeds = tuple(
+        int(cast(int, value)) for value in cast(tuple[object, ...], common_config["seeds"])
+    )
+    seed_groups: tuple[int | None, ...] = seeds if checkpoint_root is not None else (None,)
     for horizon in horizons:
         for family in model_families:
-            feature_names = tuple(
-                str(name) for name in cast(tuple[object, ...], common_config["feature_names"])
-            )
-            config = AdvancedResearchConfig.model_validate(
-                {
-                    **{
-                        key: value for key, value in common_config.items() if key != "feature_names"
-                    },
-                    "horizons": (horizon,),
-                    "model_families": (family,),
-                }
-            )
-            batches.append(
-                ResearchCampaignBatch(
-                    batch_id=f"h{horizon}-{family}",
-                    horizon=horizon,
-                    model_family=family,
-                    config_hash=config.config_hash,
-                    feature_names_hash=_stable_hash(feature_names),
+            for seed in seed_groups:
+                batch_seeds = seeds if seed is None else (seed,)
+                feature_names = tuple(
+                    str(name) for name in cast(tuple[object, ...], common_config["feature_names"])
                 )
-            )
+                config = AdvancedResearchConfig.model_validate(
+                    {
+                        **{
+                            key: value
+                            for key, value in common_config.items()
+                            if key != "feature_names"
+                        },
+                        "horizons": (horizon,),
+                        "model_families": (family,),
+                        "seeds": batch_seeds,
+                    }
+                )
+                batches.append(
+                    ResearchCampaignBatch(
+                        batch_id=(
+                            f"h{horizon}-{family}"
+                            if seed is None
+                            else f"h{horizon}-{family}-s{seed}"
+                        ),
+                        horizon=horizon,
+                        model_family=family,
+                        seed=seed,
+                        config_hash=config.config_hash,
+                        feature_names_hash=_stable_hash(feature_names),
+                    )
+                )
+    schema_version = (
+        "research-campaign-manifest-v2"
+        if checkpoint_root is not None
+        else "research-campaign-manifest-v1"
+    )
     plan_id = _campaign_plan_identity(
-        schema_version="research-campaign-manifest-v1",
+        schema_version=schema_version,
         build_id=build_id,
         build_manifest_path=build_manifest_path,
         code_commit=code_commit,
@@ -118,14 +145,19 @@ def create_campaign_manifest(
         experiment_registry=experiment_registry,
         common_config=common_config,
         batches=batches,
+        checkpoint_root=checkpoint_root,
     )
     values: dict[str, object] = {
+        "schema_version": schema_version,
         "campaign_id": plan_id,
         "build_id": build_id,
         "build_manifest_path": str(build_manifest_path.resolve()),
         "code_commit": code_commit,
         "report_root": str(report_root.resolve()),
         "experiment_registry": str(experiment_registry.resolve()),
+        "checkpoint_root": (
+            None if checkpoint_root is None else str(checkpoint_root.resolve())
+        ),
         "common_config": common_config,
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -144,6 +176,9 @@ def campaign_identity(manifest: ResearchCampaignManifest) -> str:
         experiment_registry=Path(manifest.experiment_registry),
         common_config=manifest.common_config,
         batches=manifest.batches,
+        checkpoint_root=(
+            None if manifest.checkpoint_root is None else Path(manifest.checkpoint_root)
+        ),
     )
 
 
@@ -157,8 +192,9 @@ def _campaign_plan_identity(
     experiment_registry: Path,
     common_config: dict[str, object],
     batches: list[ResearchCampaignBatch],
+    checkpoint_root: Path | None,
 ) -> str:
-    payload = {
+    payload: dict[str, object] = {
         "schema_version": schema_version,
         "build_id": build_id,
         "build_manifest_path": str(build_manifest_path.resolve()),
@@ -173,10 +209,15 @@ def _campaign_plan_identity(
                 "model_family": batch.model_family,
                 "config_hash": batch.config_hash,
                 "feature_names_hash": batch.feature_names_hash,
+                **({"seed": batch.seed} if schema_version.endswith("-v2") else {}),
             }
             for batch in batches
         ],
     }
+    if schema_version.endswith("-v2"):
+        payload["checkpoint_root"] = (
+            None if checkpoint_root is None else str(checkpoint_root.resolve())
+        )
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -257,6 +298,8 @@ def authenticate_batch_artifact(
         raise RuntimeError("research campaign batch horizon mismatch")
     if report.config.model_families != (batch.model_family,):
         raise RuntimeError("research campaign batch model family mismatch")
+    if batch.seed is not None and report.config.seeds != (batch.seed,):
+        raise RuntimeError("research campaign batch seed mismatch")
     if _stable_hash(report.feature_names) != batch.feature_names_hash:
         raise RuntimeError("research campaign batch feature names mismatch")
     return report.report_id, str(oof_path.resolve())

@@ -111,6 +111,13 @@ function Get-RunnerStatus([string]$ManifestPath, [bool]$FullArtifactCheck) {
             batch_id = [string]$batch.batch_id
             horizon = [int]$batch.horizon
             model_family = [string]$batch.model_family
+            seed = $(
+                if ($batch.PSObject.Properties.Name -contains 'seed' -and $null -ne $batch.seed) {
+                    [int]$batch.seed
+                } else {
+                    $null
+                }
+            )
             stored_status = [string]$batch.status
             effective_status = $effective
             attempts = [int]$batch.attempts
@@ -223,6 +230,12 @@ function Invoke-Campaign([string]$ManifestPath, [string]$RunnerLogRoot) {
         '--experiment-registry', [string]$payload.experiment_registry,
         '--log-root', $childLogRoot
     )
+    if (
+        $payload.PSObject.Properties.Name -contains 'checkpoint_root' -and
+        $null -ne $payload.checkpoint_root
+    ) {
+        $arguments += @('--checkpoint-root', [string]$payload.checkpoint_root)
+    }
     Write-RunnerEvent $RunnerLogRoot 'RESUME' ([string]$payload.campaign_id)
     & $python @arguments
     $exitCode = $LASTEXITCODE
@@ -237,7 +250,7 @@ if ($Action -eq 'status') {
         $status | ConvertTo-Json -Depth 6
     } else {
         "campaign=$($status.campaign_id) validation=$($status.validation) holdout_accessed=false"
-        $status.batches | Format-Table batch_id, stored_status, effective_status, attempts, worker_alive, report_id -AutoSize
+        $status.batches | Format-Table batch_id, seed, stored_status, effective_status, attempts, worker_alive, report_id -AutoSize
     }
     exit 0
 }

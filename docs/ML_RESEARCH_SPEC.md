@@ -394,6 +394,17 @@ rejection reason
 
 全特徴を同時に足した一度の結果だけで採否を決めない。
 
+## 7.2 長時間研究の中断・再開
+
+- local runnerはCodex processから独立し、Windows再起動後も同じcampaign manifestから再開する
+- 新規campaignは`model family × horizon × seed`をbatch境界とする
+- batch内はOptuna studyとwalk-forward foldを永続化し、認証済み完了単位を再計算しない
+- fold identityはDataset、Feature、code、config、parameter、seed、split境界を含む
+- `RUNNING`のworkerが消えた状態は`INTERRUPTED`として保持し、成功に書き換えない
+- artifact / config / Dataset / Feature / code hash不一致はfail closedする
+- 進捗照会はread-onlyとし、周期的なPID / CPU pollingを必須にしない
+- development checkpointへlocked final holdoutのrow、label、metricを保存しない
+
 ## 8. 固定実験一覧
 
 | ID | 実験 |
