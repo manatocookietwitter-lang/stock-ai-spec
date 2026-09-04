@@ -512,3 +512,12 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - read-only確認入口: `powershell -NoProfile -File runner/research-runner.ps1 -Action status -Manifest artifacts/campaigns/goal3-base-v3.json`
 - Windows PowerShell 5.1のnative引数quote差異と、Task Scheduler権限境界でのGit ownership判定を修正した。repo限定の`safe.directory`をprocess引数へ渡すだけでglobal Git設定は変更していない
 - Task Scheduler `StockAI-Goal3-Research`を登録し、初回の独立起動を確認。`h5-lightgbm`はattempt 2の保存状態・実効状態とも`RUNNING`、worker identity一致、task状態`Running`であり、以後は周期監視せずrunnerへ委譲する
+
+## 2026-09-04 Goal 4 / Goal 5 live capability再確認
+
+- 独立runnerの学習process・PIDは照会せず、`stock-ai research morning-capabilities`と`stock-ai ops capabilities`だけをread-only実行した
+- Goal 4は`morning_ohlc / intraday_bars / intraday_volume_profile / quotes / order_book / trade_frequency`がすべて`BLOCKED_BY_DATA_CAPABILITY`。前場market-data providerは未設定であり、日足やfixtureから推測しない
+- `morning_model_adoption`も、認証済みlive OOS evidenceと承認済みmodel registry entryがないため`BLOCKED_BY_DATA_CAPABILITY`
+- Goal 5は`operational_ledger / in_app_notifications`が`AVAILABLE`、remote accessは`LOCALHOST_ONLY`、web pushは`BLOCKED_BY_CONFIGURATION`
+- 実運用開始には、Goal 3の固定Championと単回holdout結果、exact 11:30前場provider、local PWAでユーザーが手入力する実保有・account bucket・available / reserved cash・取得単価・税/NISA状態、cost/slippage方針、認証済みJPX Paper calendarが必要。SBI CSVはD068どおり必須ではない
+- `order_submission`は`OUT_OF_SCOPE`であり、broker発注・自動売買は実装しない
