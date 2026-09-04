@@ -655,3 +655,22 @@ full JPXの5日LightGBM実runでは、2,826,087行 × 77特徴のfoldを前処�
 この変更はfeature定義、target、fold境界、purge / embargo、Optuna範囲、model family、locked holdout境界を変えない。
 ただし数値表現は研究codeの一部なので、新しいcode commitとcampaign identityで追跡し、旧codeの成功reportを
 新campaignの成功batchとして偽装しない。OOMを含む失敗experimentと完了済みtrial / fold監査は削除しない。
+
+### D072 — 長時間研究はCodex非依存runnerへ委譲し、状態照会を要求時だけ行う
+
+長時間のGoal 3研究はWindows Task Schedulerから起動するlocal runnerへ委譲し、Codex processや会話sessionの
+存続へ依存させない。runnerは認証済みcampaign manifestを唯一の再開入口とし、未完了batchを順に実行する。
+同じmanifestに対する排他lockとTask Schedulerの`IgnoreNew`を併用し、生存中workerの重複起動を禁止する。
+保存状態が`RUNNING`でも、記録PID・process名・開始時刻が一致するworkerが存在しない場合だけatomicに
+`INTERRUPTED`へ遷移して再開する。Windows再起動後はlogon triggerと`StartWhenAvailable`から同じ入口を使う。
+
+runner開始前にcampaign / Production Build identityを認証し、model source・dependency lockがcampaignの
+code commitと異なる場合、または未追跡sourceが存在する場合はfail closedする。各研究batchは従来どおり
+Dataset / feature / Build / config / commitを完全認証してから計算し、成功済みcontent-addressed reportと
+Experiment Registryを再認証してskipする。研究workerへ`JQUANTS_API_KEY`を継承せず、locked holdout評価は
+development campaignと別の明示入口まで禁止する。
+
+進捗確認は`runner/research-runner.ps1 -Action status`をread-only入口とし、Codexによる周期的PID / CPU監視は
+行わない。statusは保存状態とworker identityから求めたeffective状態を表示するだけでmanifestを書き換えない。
+fold / Optuna trial単位の永続再利用は、動作中batchのsourceを変更せずに移行できる境界で追加する。それまでは
+D070の`horizon × model family`成功artifactを最小再利用単位とし、既存1日model成果物と失敗監査を削除しない。

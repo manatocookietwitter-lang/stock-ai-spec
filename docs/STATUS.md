@@ -1,7 +1,7 @@
 # Project Status
 
-更新日: 2026-08-25
-状態: `LIVE_ACCEPTANCE_PARTIAL_CHECKPOINT_2020_COMPLETE`
+更新日: 2026-09-04
+状態: `GOAL3_INDEPENDENT_RESEARCH_RUNNER_HANDOFF`
 
 ## Goal 1で実装したもの
 
@@ -500,3 +500,13 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - attempt 2の失敗、完了trial、生成済みfold監査はExperiment Registryへappend済み。content-addressed成功reportは公開されず、5日XGBoost以降も開始していない。locked final holdoutは引き続き未開封
 - D071として有限値正規化を列単位の事前確保`float32`行列へ変更し、training-only clip / medianも`float32`、clip / fill / dropをin-place化した。行数・特徴数・target・fold・purge / embargo・tuning範囲は削減していない
 - 変更後はAdvanced Research / campaign 44 testをFutureWarningエラー扱いでpass、Ruffとstrict mypy（45 source files）もpass。新code commitを固定した5日 / 20日campaignとして再開し、旧code成功分と新code分のprovenanceを混同しない
+
+## 2026-09-04 Goal 3独立runnerへの引継ぎ
+
+- ユーザー指示により、Codexが30〜60秒周期でPID / CPUを監視する運用を廃止した。以後はユーザーが進捗を尋ねた時だけread-only statusを1回実行する
+- 最終の単発process確認ではPython workerが存在せず、campaign `28f0c8df2ed45e5d345271a14ffcb9f7fc288998c4dd710ec10cf6e290b52558`の`h5-lightgbm`だけが保存上`RUNNING`、実効状態`INTERRUPTED`だった。locked holdoutは未開封
+- `runner/research-runner.ps1`を追加。campaign / Build / source / dependency provenance、完了artifactを認証し、排他lock、生存worker重複拒否、dead `RUNNING`のatomic `INTERRUPTED`遷移、未完了batchの自動resumeを行う
+- `runner/register-research-runner-task.ps1`を追加。hiddenなWindows Task Scheduler jobとしてlogon時と5分周期の再開入口を構成し、Codex終了やWindows再起動後も同一manifestから再開できる
+- 研究childへ`JQUANTS_API_KEY`を継承しない。command / task / manifest / runner logにもcredentialを保存しない
+- 現行campaignの安全を優先し、最小checkpointはD070の`horizon × model family`単位を維持する。fold / Optuna trialの永続再利用は独立campaign完了後のsource変更境界で追加し、完了済み1日3familyのreportと全失敗監査を保持する
+- read-only確認入口: `powershell -NoProfile -File runner/research-runner.ps1 -Action status -Manifest artifacts/campaigns/goal3-base-v3.json`
