@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -1356,11 +1357,14 @@ def research_campaign(
         )
         typer.echo(f"batch={batch.batch_id} status=RUNNING attempt={batch.attempts} log={log_path}")
         with log_path.open("a", encoding="utf-8") as stream:
+            child_environment = os.environ.copy()
+            child_environment.pop("JQUANTS_API_KEY", None)
             process = subprocess.Popen(
                 command,
                 stdout=stream,
                 stderr=subprocess.STDOUT,
                 cwd=Path.cwd(),
+                env=child_environment,
                 text=True,
             )
             batch.child_pid = process.pid

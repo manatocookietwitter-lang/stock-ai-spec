@@ -202,8 +202,13 @@ def test_campaign_child_command_contains_no_credentials(tmp_path: Path) -> None:
 
 
 class _CompletedProcess:
+    last_environment: dict[str, str] | None = None
+
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         self.pid = 1234
+        environment = _kwargs.get("env")
+        if isinstance(environment, dict):
+            type(self).last_environment = environment
 
     def wait(self, timeout: int | None = None) -> int:
         del timeout
@@ -223,6 +228,7 @@ def test_campaign_cli_runs_batches_and_persists_success(
         lambda _path: SimpleNamespace(build_id="b" * 64),
     )
     monkeypatch.setattr("stock_ai.cli.subprocess.Popen", _CompletedProcess)
+    monkeypatch.setenv("JQUANTS_API_KEY", "must-not-reach-research-child")
 
     def succeed(manifest, *, batch_ids=None):  # type: ignore[no-untyped-def]
         for batch in manifest.batches:
@@ -263,6 +269,8 @@ def test_campaign_cli_runs_batches_and_persists_success(
     assert "status=SUCCEEDED batches=2" in result.stdout
     loaded = load_campaign_manifest(campaign_path)
     assert all(batch.status is CampaignBatchStatus.SUCCEEDED for batch in loaded.batches)
+    assert _CompletedProcess.last_environment is not None
+    assert "JQUANTS_API_KEY" not in _CompletedProcess.last_environment
 
 
 def test_campaign_cli_rejects_manifest_for_different_plan(

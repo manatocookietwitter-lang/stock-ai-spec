@@ -490,5 +490,5 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - D060の既存方針を実運用化し、`stock-ai research campaign`を追加した。`1 horizon × 1 model family`ごとに独立process、content-addressed report、append-only Experiment Registry、atomic resume manifest、attempt別logを持つ
 - 再開時は保存済みartifactをhash / identity / config / commitまで再認証し、成功分をskipする。report公開直後の親停止はartifactから回復し、停止済み`RUNNING`だけを`INTERRUPTED`として再実行する。生存中childは二重起動しない
 - ablation後の選択済みfeature subsetを同じbatch境界で再学習できるようにし、V2外・重複featureを拒否してfeature名hashもresume認証へ含めた
-- API keyはcampaign command / manifest / logへ含めない。campaignとlogはGit対象外、実験結果は既存の認証済みartifact境界とExperiment Registryへ保存する
+- API keyは不要な研究childの環境から除去し、campaign command / manifest / logへも含めない。campaignとlogはGit対象外、実験結果は既存の認証済みartifact境界とExperiment Registryへ保存する
 - 旧runの失敗理由はresource scaleと中断粒度であり、model成績による棄却ではない。development選択は新campaignの完了結果だけから行い、全選択固定までlocked holdoutを開かない
