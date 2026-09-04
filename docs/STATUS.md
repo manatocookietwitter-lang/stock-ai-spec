@@ -1,7 +1,7 @@
 # Project Status
 
 更新日: 2026-09-04
-状態: `GOAL3_INDEPENDENT_RESEARCH_RUNNER_HANDOFF`
+状態: `GOAL3_INDEPENDENT_RESEARCH_RUNNING`
 
 ## Goal 1で実装したもの
 
@@ -510,3 +510,5 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - 研究childへ`JQUANTS_API_KEY`を継承しない。command / task / manifest / runner logにもcredentialを保存しない
 - 現行campaignの安全を優先し、最小checkpointはD070の`horizon × model family`単位を維持する。fold / Optuna trialの永続再利用は独立campaign完了後のsource変更境界で追加し、完了済み1日3familyのreportと全失敗監査を保持する
 - read-only確認入口: `powershell -NoProfile -File runner/research-runner.ps1 -Action status -Manifest artifacts/campaigns/goal3-base-v3.json`
+- Windows PowerShell 5.1のnative引数quote差異と、Task Scheduler権限境界でのGit ownership判定を修正した。repo限定の`safe.directory`をprocess引数へ渡すだけでglobal Git設定は変更していない
+- Task Scheduler `StockAI-Goal3-Research`を登録し、初回の独立起動を確認。`h5-lightgbm`はattempt 2の保存状態・実効状態とも`RUNNING`、worker identity一致、task状態`Running`であり、以後は周期監視せずrunnerへ委譲する
