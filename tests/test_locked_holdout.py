@@ -25,6 +25,11 @@ from stock_ai.ml.advanced import (
     EnsembleResult,
     UncertaintyCalibration,
 )
+from stock_ai.ml.campaign import (
+    CampaignBatchStatus,
+    create_campaign_manifest,
+    write_campaign_manifest,
+)
 from stock_ai.ml.holdout import (
     HoldoutComponentCheckpoint,
     HoldoutComponentResult,
@@ -1035,25 +1040,26 @@ def test_candidate_runner_status_and_registration_are_read_only(tmp_path: Path) 
     environment["JQUANTS_API_KEY"] = "test-placeholder-never-print"
     feature_before = feature_path.read_bytes()
 
+    status_command = [
+        str(powershell),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(project_root / "runner" / "candidate-runner.ps1"),
+        "-Action",
+        "status",
+        "-FeatureSelection",
+        str(feature_path),
+        "-BuildManifest",
+        str(build_path),
+        "-CodeCommit",
+        "unused-for-read-only-status",
+        "-CampaignRoot",
+        str(tmp_path / "campaigns"),
+    ]
     status = subprocess.run(
-        [
-            str(powershell),
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(project_root / "runner" / "candidate-runner.ps1"),
-            "-Action",
-            "status",
-            "-FeatureSelection",
-            str(feature_path),
-            "-BuildManifest",
-            str(build_path),
-            "-CodeCommit",
-            "unused-for-read-only-status",
-            "-CampaignRoot",
-            str(tmp_path / "campaigns"),
-        ],
+        status_command,
         cwd=project_root,
         env=environment,
         check=False,
@@ -1101,6 +1107,84 @@ def test_candidate_runner_status_and_registration_are_read_only(tmp_path: Path) 
     assert "-RunDiagnostics:true" in registration.stdout
     assert "holdout_accessed" in registration.stdout
     assert ": False" in registration.stdout
+
+    exact_build_directory = tmp_path / "builds" / feature_selection.build_id
+    exact_build_directory.mkdir(parents=True)
+    exact_build_path = (
+        exact_build_directory / f"{feature_selection.build_id}.json"
+    ).resolve()
+    exact_build_payload: dict[str, object] = {
+        "build_id": feature_selection.build_id,
+        "manifest_path": str(exact_build_path),
+        "dataset_snapshot_id": feature_selection.data_snapshot_id,
+        "v2_snapshot_id": feature_selection.feature_snapshot_id,
+    }
+    exact_build_payload["metadata_hash"] = hashlib.sha256(
+        json.dumps(
+            exact_build_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    exact_build_path.write_text(json.dumps(exact_build_payload), encoding="utf-8")
+    common_config = {
+        "target_family": "return",
+        "seeds": (17, 29, 43),
+        "tuning_trials": 1,
+        "tuning_timeout_seconds": 10,
+        "estimator_count": 5,
+        "initial_train_periods": 20,
+        "validation_periods": 5,
+        "step_periods": 5,
+        "holdout_periods": feature_selection.holdout_periods,
+        "run_ablations": False,
+        "run_diagnostics": False,
+        "max_materialized_oof_rows": 10_000,
+        "max_model_fits": 100,
+        "feature_names": feature_selection.horizons[0].feature_names,
+    }
+    campaign = create_campaign_manifest(
+        build_id=feature_selection.build_id,
+        build_manifest_path=exact_build_path,
+        code_commit="candidate-commit",
+        report_root=tmp_path / "reports",
+        experiment_registry=tmp_path / "experiments.jsonl",
+        horizons=(1,),
+        model_families=("lightgbm",),
+        common_config=common_config,
+        checkpoint_root=tmp_path / "checkpoints",
+        now=datetime(2026, 1, 8, tzinfo=UTC),
+    )
+    reused_pid = campaign.batches[0]
+    reused_pid.status = CampaignBatchStatus.RUNNING
+    reused_pid.child_pid = os.getpid()
+    reused_pid.started_at = datetime(2000, 1, 1, tzinfo=UTC)
+    campaign_path = (
+        tmp_path
+        / "campaigns"
+        / feature_selection.feature_selection_id
+        / "h1.json"
+    )
+    write_campaign_manifest(campaign, campaign_path)
+    campaign_before = campaign_path.read_bytes()
+
+    reused_status = subprocess.run(
+        status_command,
+        cwd=project_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert reused_status.returncode == 0, reused_status.stderr
+    reused_payload = json.loads(reused_status.stdout)
+    current = reused_payload["horizons"][0]["campaign"]["current_batch"]
+    assert current["stored_status"] == "RUNNING"
+    assert current["effective_status"] == "INTERRUPTED"
+    assert current["worker_alive"] is False
+    assert campaign_path.read_bytes() == campaign_before
 
 
 def _feature_selection_fixture(
