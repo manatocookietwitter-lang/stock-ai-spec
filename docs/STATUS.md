@@ -591,3 +591,11 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - 5日・20日は予定どおり3 model family × 3 seedのfull Feature Ablationを行う。locked holdoutは未開封のまま、正常な長時間計算はrunnerへ委譲し、Codexは継続監視しない
 - 現行のPython campaign親はmanifest内batchを連続実行し、稼働中processへ次batchだけを安全に差し替えるcontrol pointを持たない。D077のruntime切替は現在のseed 17を壊さないbatch境界でのみ行い、それまではsource / manifestを変更しない
 - 現在の`h1-lightgbm-s17`が成功状態をatomic保存した後、旧計画の`h1-lightgbm-s29` workerを起動する直前だけfail closedする一回限りの境界ラッチを、次attempt log pathへdirectoryとして設置した。現worker、親process、manifest、checkpoint、Registryには触れず、次の長時間workerを重複・旧条件で開始しない。pause-after sidecarを読むrunnerも追加し、以後のTask Scheduler再実行は指定batch成功かつ全後続PENDINGなら正常終了で待機する。境界判定の隔離test 3件を含むrunner test 10件はpass。次回ユーザー要求時のread-only statusで安全境界を確認してから、1日screen campaignと5日・20日full campaignへrunner入口を切り替える
+
+## 2026-09-06 Goal 3 multi-seed軽量screen方針
+
+- D078として、screen結果を見る前に全horizonの共通screen・family打切り条件・計算削減順序を固定した。削減目的は重複と見込みの薄い追加探索の除去であり、multiple seeds、walk-forward OOF、cost評価、holdout隔離は削らない
+- 5日・20日はLightGBM / XGBoost / CatBoostをseed 17だけで落とさず、同一条件の最低3 seed OOFを先に比較する。paired block-bootstrap 95% CI、seed × foldの80%、全objective、ensemble全split、cost / turnover / downsideの全棄却条件を満たすfamilyだけ`SCREEN_REJECTED`とし、それ以外は`SCREEN_HOLD`または通過としてfull Ablationへ残す。削減数目標は置かない
+- 1日はD077どおりChallengerで、比較可能な既存seed 17を再利用して不足seedだけ軽量screenする。既存成果物のcode / split / feature / parameterが一致しない場合は補助evidenceとして保持するが、純粋なseed安定性へ混ぜず、不足する比較可能seedだけを追加する
+- screen通過・保留のhorizon × familyだけF1〜F12 full Ablationへ進み、tuning期間と評価OOFを分離し、importance / SHAP単独で採用しない。Final CandidateはAblation後の残存候補だけで全model要素をdevelopment OOFから固定する
+- 現在実行中の正常batch、境界ラッチ、artifact、checkpoint、Experiment Registry、locked holdoutは変更していない。安全なbatch境界到達まではruntime planを切り替えず、Codexによる継続監視を行わない

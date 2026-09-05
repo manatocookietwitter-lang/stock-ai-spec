@@ -767,3 +767,27 @@ seed 29 / 43だけを同一研究境界で追加する。LightGBM seed 17は保�
 不足値を0や推測値で埋めず、一つでも不成立または評価不能ならscreenは不合格とする。不合格なら1日をFinal Candidateから除外し、
 以後の計算資源を5日・20日に集中する。合格しても1日は主alphaへ自動昇格させず、補助寄与としてのみ評価する。
 この判定は1日の新しい複数seed結果を見る前に固定し、locked holdoutを一切使わない。
+
+### D078 — Full Ablation前に比較可能なmulti-seed screenを置く
+
+計算削減の目的は研究期間の短縮ではなく、認証済み計算の再利用と見込みの薄い追加探索の停止である。1日・5日・20日の
+full Feature Ablation前に、同一Dataset、feature列、walk-forward split、preprocessing、objective、estimator / tuning設定で
+seedだけを変えた最低3 seedのdevelopment OOF軽量screenを置く。screenではF1〜F12 ablation、大規模追加Optuna、SHAP全量を
+実行しないが、multiple seeds、全walk-forward fold、cost / turnover / downside評価は削らない。
+
+既存report、OOF、fold、Optuna trial、checkpointは全identityを認証できる場合だけ再利用する。code commit、split、feature、
+parameterが異なる成果物は削除せず補助evidenceとして残すが、seedだけの安定性比較へ混ぜない。比較可能なseedが不足する場合は、
+同じ軽量screen設定で不足seedだけを追加する。結果を見た後にこの互換条件を緩めない。
+
+5日・20日のLightGBM / XGBoost / CatBoostをseed 17の順位だけで除外しない。追加の重い探索を停止できるfamilyは、
+対象objectiveでpaired block-bootstrap 95%信頼区間が劣位かつseed × foldの80%以上で劣位、cross-fitted非負ensembleの
+全split weightが0でscore改善なし、regression / ranking / quantile / large-lossの全役割で改善なし、さらにrealistic cost後の
+Decision Engine objective改善がなくturnover / downside / large-lossにも追加価値なし、をすべて満たすものだけとする。
+
+一条件でも不明・不成立なら`SCREEN_HOLD`、全条件成立時だけ`SCREEN_REJECTED`とする。削減family数の目標は置かず、
+screen通過または保留のhorizon × familyだけfull ablationへ進める。Ablation後のFinal Candidateではhorizon、family、objective、
+feature、parameter、downside / large-loss、ensemble weight、uncertaintyをdevelopment OOFだけで固定し、Rank IC単独ではなく
+NDCG、seed / fold安定性、cost後改善、turnover、downside、ensemble追加価値を合わせて判断する。
+
+計算削減の優先順は、認証済み成果物再利用、重複計算排除、screen不要探索の省略、明確な劣位familyの追加探索停止、
+通過候補だけのFinal Candidateとする。locked holdoutは全選択固定まで開かない。
