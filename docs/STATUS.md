@@ -603,6 +603,7 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 ## 2026-09-06 Goal 3後続screen予約
 
 - D079に従う`runner/goal3-phase-runner.ps1`とTask Scheduler登録入口を追加した。別taskは既存research runner lockが解放されるまで計算せず、現在のseed 17 worker・親process・既存taskを停止、再起動、再登録しない
+- Windows Task Scheduler `StockAI-Goal3-Phased`を登録済み。確認時は`Ready`、`MultipleInstances=IgnoreNew`で、既存runner lock保有中の起動は計算せず終了する
 - 安全境界後は、1日XGBoost / CatBoost × seed 17 / 29 / 43、続いて5日・20日LightGBM / XGBoost / CatBoost × seed 17 / 29 / 43のlightweight screenを自動run / resumeする。各batchはfold / Optuna checkpointと認証済みartifactを再利用する
 - screen configはV2全列、3 trial / 900秒、50 estimator、500 / 60 / 60 session、holdout境界120、Ablation / diagnosticsなしで結果前に固定した。full Ablationはscreen判定後の通過・保留候補だけへ限定する
 - read-only進捗入口は`powershell -NoProfile -ExecutionPolicy Bypass -File runner/goal3-phase-runner.ps1 -Action status`。今後もユーザーが「進捗」と求めた時だけ1回実行し、継続監視しない
