@@ -78,6 +78,34 @@ $alive = ConvertTo-WorkerAlive -WorkerState $state
     return json.loads(result.stdout)
 
 
+def _pause_boundary(first_status: str, second_status: str) -> subprocess.CompletedProcess[str]:
+    project_root = Path(__file__).resolve().parents[1]
+    helper = project_root / "runner" / "worker-state.ps1"
+    script = f"""
+. {_quote(helper)}
+$batches = @(
+    [pscustomobject]@{{ batch_id = 'first'; stored_status = '{first_status}' }},
+    [pscustomobject]@{{ batch_id = 'second'; stored_status = '{second_status}' }}
+)
+Get-PauseBoundaryState -Batches $batches -BatchId 'first'
+"""
+    return subprocess.run(
+        [
+            str(_powershell()),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 def test_winerror_87_is_unknown_and_never_interrupted() -> None:
     observed = _probe(
         "throw (New-Object System.ComponentModel.Win32Exception 87)"
@@ -138,6 +166,27 @@ def test_matching_python_pid_and_start_time_is_alive() -> None:
         "effective_status": "RUNNING",
         "worker_alive": True,
     }
+
+
+def test_pause_boundary_waits_until_target_succeeds() -> None:
+    observed = _pause_boundary("RUNNING", "PENDING")
+
+    assert observed.returncode == 0, observed.stderr
+    assert observed.stdout.strip() == "CONTINUE"
+
+
+def test_pause_boundary_holds_before_all_pending_tail() -> None:
+    observed = _pause_boundary("SUCCEEDED", "PENDING")
+
+    assert observed.returncode == 0, observed.stderr
+    assert observed.stdout.strip() == "PAUSE"
+
+
+def test_pause_boundary_fails_closed_if_tail_already_started() -> None:
+    observed = _pause_boundary("SUCCEEDED", "RUNNING")
+
+    assert observed.returncode != 0
+    assert "boundary was crossed" in observed.stderr
 
 
 def test_real_missing_pid_is_dead() -> None:

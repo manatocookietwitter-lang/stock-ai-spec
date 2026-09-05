@@ -189,6 +189,21 @@ function Write-RunnerEvent([string]$Root, [string]$Event, [string]$Detail) {
     Add-Content -LiteralPath (Join-Path $Root 'runner.jsonl') -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
 }
 
+function Get-PauseAfterBatch([string]$ManifestPath) {
+    $policyPath = "$ManifestPath.pause-after.json"
+    if (-not (Test-Path -LiteralPath $policyPath -PathType Leaf)) {
+        return $null
+    }
+    $policy = Get-Content -LiteralPath $policyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (
+        [string]$policy.schema_version -ne 'research-runner-pause-after-v1' -or
+        -not ([string]$policy.batch_id).Trim()
+    ) {
+        throw 'runner pause-after policy is invalid'
+    }
+    return $policy
+}
+
 function Set-StaleBatchesInterrupted([string]$ManifestPath, [string[]]$BatchIds) {
     if ($BatchIds.Count -eq 0) {
         return
@@ -225,6 +240,20 @@ function Invoke-Campaign([string]$ManifestPath, [string]$RunnerLogRoot) {
     if ($active.Count -gt 0) {
         Write-RunnerEvent $RunnerLogRoot 'ALREADY_RUNNING' (($active.batch_id) -join ',')
         return 0
+    }
+    $pausePolicy = Get-PauseAfterBatch $ManifestPath
+    if ($null -ne $pausePolicy) {
+        if (
+            $pausePolicy.PSObject.Properties.Name -contains 'campaign_id' -and
+            [string]$pausePolicy.campaign_id -ne [string]$status.campaign_id
+        ) {
+            throw 'runner pause-after campaign identity mismatch'
+        }
+        $boundaryState = Get-PauseBoundaryState $status.batches ([string]$pausePolicy.batch_id)
+        if ($boundaryState -eq 'PAUSE') {
+            Write-RunnerEvent $RunnerLogRoot 'PAUSED_AT_POLICY_BOUNDARY' ([string]$pausePolicy.batch_id)
+            return 0
+        }
     }
     $unknown = @($status.batches | Where-Object { $_.effective_status -eq 'UNKNOWN' })
     if ($unknown.Count -gt 0) {

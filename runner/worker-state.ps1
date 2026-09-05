@@ -87,3 +87,36 @@ function ConvertTo-WorkerAlive {
         default { return $null }
     }
 }
+
+function Get-PauseBoundaryState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Batches,
+        [Parameter(Mandatory = $true)]
+        [string]$BatchId
+    )
+
+    $pauseIndex = -1
+    for ($index = 0; $index -lt $Batches.Count; $index += 1) {
+        if ([string]$Batches[$index].batch_id -eq $BatchId) {
+            $pauseIndex = $index
+            break
+        }
+    }
+    if ($pauseIndex -lt 0) {
+        throw 'runner pause-after batch is absent from campaign'
+    }
+    if ([string]$Batches[$pauseIndex].stored_status -ne 'SUCCEEDED') {
+        return 'CONTINUE'
+    }
+    $unexpectedTail = @(
+        $Batches |
+            Select-Object -Skip ($pauseIndex + 1) |
+            Where-Object { [string]$_.stored_status -ne 'PENDING' }
+    )
+    if ($unexpectedTail.Count -gt 0) {
+        throw 'runner pause-after boundary was crossed by an unexpected batch'
+    }
+    return 'PAUSE'
+}
