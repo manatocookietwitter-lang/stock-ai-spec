@@ -567,3 +567,9 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - legacy base campaignの全9 batch完了と成果物checkpoint `b1d8fef`を安全境界として、`goal3-granular-checkpoints`のfold / Optuna永続checkpoint、feature固定、candidate campaign、development選択固定、単回holdout評価基盤をmainへ統合した
 - 次の実データ処理は3 seed以上のv2 Feature Ablation campaignであり、研究code / feature定義 / seed / bounded Optuna条件を固定して独立runnerへ委譲する。全development選択固定までlocked holdoutを開かない
 - main統合後gateはRuff、strict mypy（48 source files）、Python 234 test、branch coverage 85.29%、frontend ESLint / TypeScript / Vitest 6件 / production build、Microsoft Edge E2E 1件がpass。Task Scheduler設定表示の端末幅依存改行を固定幅出力へ修正し、該当回帰testを含む全suiteで再確認した
+
+## 2026-09-05 Goal 3 3-seed Feature Ablation開始
+
+- main commit `000812e09be3ceef5491aab073b47778a757c165`、Production Build `2fc936a7ca9b939d8016ad3c5efea17c53ffd5264d5ece398a8329bf2f2dfe5f`、FeatureSet V2、seed 17 / 29 / 43を固定し、v2 campaign `94b974e90eb666c93d18b9fec7985628ef33de3c240e25aefe731a7912a87285`を作成した
+- campaignは1 / 5 / 20日 × LightGBM / XGBoost / CatBoost × 3 seedの27 batch。各batchで20 trial / 累積900秒のbounded Optuna、300 estimator、F1〜F12 chronological ablation、OOS diagnosticsを実行し、fold / trial checkpointから再開する
+- Windows Task Scheduler `StockAI-Goal3-Ablation`へ登録して開始要求済み。Codexは周期監視せず、ユーザーが進捗を尋ねた時だけ`goal3-ablation-v2.json`のread-only statusを1回確認する。locked holdoutは未開封
