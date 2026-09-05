@@ -791,3 +791,20 @@ NDCG、seed / fold安定性、cost後改善、turnover、downside、ensemble追�
 
 計算削減の優先順は、認証済み成果物再利用、重複計算排除、screen不要探索の省略、明確な劣位familyの追加探索停止、
 通過候補だけのFinal Candidateとする。locked holdoutは全選択固定まで開かない。
+
+### D079 — seed 17後のscreen campaignを別Task Scheduler runnerへ予約する
+
+稼働中の`h1-lightgbm-s17`を停止・再起動せず、既存research runner lockが解放されるまで計算を始めない
+`goal3-phase-runner`を別Task Scheduler taskとして予約する。現在taskの定義・process・workerは変更しない。
+安全境界後は1日XGBoost / CatBoostの比較可能なseed 17 / 29 / 43 lightweight screenを先に実行し、続いて
+5日・20日のLightGBM / XGBoost / CatBoost × seed 17 / 29 / 43 screenを実行する。
+
+screen設定は結果を見る前に、FeatureSet V2全列、3 Optuna trial、累積900秒、50 estimator、500 session initial train、
+60 session validation / step、120 session locked holdout境界、`run_ablations=false`、`run_diagnostics=false`へ固定する。
+report探索rootは既存認証済み成果物と共通にし、config / code / seedを含む完全identityが一致するartifactだけを再利用する。
+一致しないseed 17は削除せず補助evidenceとして保持し、比較可能性確保に必要なlightweight seed 17だけを再計算する。
+
+phase runnerはAPI keyを研究childへ渡さず、locked holdout評価を呼ばない。Codexの周期監視は行わない。
+ユーザーが「進捗」と求めた場合は`goal3-phase-runner.ps1 -Action status`を一度だけ実行し、現在phaseとactive campaignの
+horizon / family / seed / foldをread-only表示できる状態を維持する。screen完了後は`SCREEN_EVALUATION_READY`で、
+D077 / D078の事前固定ruleによるdevelopment-only判定へ引き渡す。

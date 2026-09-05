@@ -599,3 +599,11 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - 1日はD077どおりChallengerで、比較可能な既存seed 17を再利用して不足seedだけ軽量screenする。既存成果物のcode / split / feature / parameterが一致しない場合は補助evidenceとして保持するが、純粋なseed安定性へ混ぜず、不足する比較可能seedだけを追加する
 - screen通過・保留のhorizon × familyだけF1〜F12 full Ablationへ進み、tuning期間と評価OOFを分離し、importance / SHAP単独で採用しない。Final CandidateはAblation後の残存候補だけで全model要素をdevelopment OOFから固定する
 - 現在実行中の正常batch、境界ラッチ、artifact、checkpoint、Experiment Registry、locked holdoutは変更していない。安全なbatch境界到達まではruntime planを切り替えず、Codexによる継続監視を行わない
+
+## 2026-09-06 Goal 3後続screen予約
+
+- D079に従う`runner/goal3-phase-runner.ps1`とTask Scheduler登録入口を追加した。別taskは既存research runner lockが解放されるまで計算せず、現在のseed 17 worker・親process・既存taskを停止、再起動、再登録しない
+- 安全境界後は、1日XGBoost / CatBoost × seed 17 / 29 / 43、続いて5日・20日LightGBM / XGBoost / CatBoost × seed 17 / 29 / 43のlightweight screenを自動run / resumeする。各batchはfold / Optuna checkpointと認証済みartifactを再利用する
+- screen configはV2全列、3 trial / 900秒、50 estimator、500 / 60 / 60 session、holdout境界120、Ablation / diagnosticsなしで結果前に固定した。full Ablationはscreen判定後の通過・保留候補だけへ限定する
+- read-only進捗入口は`powershell -NoProfile -ExecutionPolicy Bypass -File runner/goal3-phase-runner.ps1 -Action status`。今後もユーザーが「進捗」と求めた時だけ1回実行し、継続監視しない
+- PowerShell 5.1 parser、Ruff、境界・status・Task登録の隔離testをpass。API key、locked holdout、model source、既存manifest / checkpoint / report / Registryは変更していない

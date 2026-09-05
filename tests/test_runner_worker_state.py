@@ -313,3 +313,37 @@ def test_research_runner_status_avoids_windows_os_kill_and_is_read_only(
     assert batch["worker_state"] == "DEAD"
     assert batch["effective_status"] == "INTERRUPTED"
     assert manifest_path.read_bytes() == manifest_before
+
+
+def test_goal3_phase_task_show_is_read_only_and_keeps_progress_entrypoint() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment["JQUANTS_API_KEY"] = "test-placeholder-never-print"
+
+    result = subprocess.run(
+        [
+            str(_powershell()),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(project_root / "runner" / "register-goal3-phase-runner-task.ps1"),
+            "-Action",
+            "show",
+        ],
+        cwd=project_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "boundary seed17 -> 1d screen -> 5d/20d screen" in result.stdout
+    assert "goal3-phase-runner.ps1 -Action status" in result.stdout
+    assert "current_worker_action" in result.stdout
+    assert ": none; waits on existing runner lock" in result.stdout
+    assert "locked_holdout_accessed" in result.stdout
+    assert ": False" in result.stdout
+    assert "test-placeholder-never-print" not in result.stdout + result.stderr
