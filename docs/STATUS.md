@@ -573,3 +573,11 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - main commit `000812e09be3ceef5491aab073b47778a757c165`、Production Build `2fc936a7ca9b939d8016ad3c5efea17c53ffd5264d5ece398a8329bf2f2dfe5f`、FeatureSet V2、seed 17 / 29 / 43を固定し、v2 campaign `94b974e90eb666c93d18b9fec7985628ef33de3c240e25aefe731a7912a87285`を作成した
 - campaignは1 / 5 / 20日 × LightGBM / XGBoost / CatBoost × 3 seedの27 batch。各batchで20 trial / 累積900秒のbounded Optuna、300 estimator、F1〜F12 chronological ablation、OOS diagnosticsを実行し、fold / trial checkpointから再開する
 - Windows Task Scheduler `StockAI-Goal3-Ablation`へ登録して開始要求済み。Codexは周期監視せず、ユーザーが進捗を尋ねた時だけ`goal3-ablation-v2.json`のread-only statusを1回確認する。locked holdoutは未開封
+
+## 2026-09-05 Windows worker生存判定の安全修正
+
+- read-only status失敗の原因を、WindowsでPythonのPOSIX式`os.kill(pid, 0)`を使用していたことによる`WinError 87`と特定した
+- runnerの生存判定を`ALIVE / DEAD / UNKNOWN`へ変更。PID不存在、非Python PID、開始時刻不一致だけを`DEAD`とし、`WinError 87`、`AccessDenied`、その他の確認失敗は`UNKNOWN`として`INTERRUPTED`へ変更しない
+- statusのcheckpoint読取から不適切なPython PID probeを除去し、確認不能でもread-onlyな`UNKNOWN`を返す。自動復旧も`UNKNOWN`が一件でもあればmanifestやworkerを変更せず終了するため、重複起動しない
+- Windows PowerShell 5.1でWinError 87、AccessDenied、PID不存在、PID再利用、正常一致、およびresearch runner statusの非変更性をfixture検証した。対象7 testはpass
+- 現在のAblation workerは停止・再起動・PID照会していない。`src`、依存lock、研究条件、seed、Ablation設定、成果物、locked holdoutは変更しておらず、研究は独立runnerへ委譲したままとする

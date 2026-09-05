@@ -12,25 +12,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'worker-state.ps1')
 
 function Resolve-ProjectPath([string]$PathValue) {
     if ([System.IO.Path]::IsPathRooted($PathValue)) {
         return [System.IO.Path]::GetFullPath($PathValue)
     }
     return [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot $PathValue))
-}
-
-function Test-WorkerIdentity($Batch) {
-    if ($null -eq $Batch.child_pid -or $null -eq $Batch.started_at) {
-        return $false
-    }
-    $process = Get-Process -Id ([int]$Batch.child_pid) -ErrorAction SilentlyContinue
-    if ($null -eq $process -or $process.ProcessName -notlike 'python*') {
-        return $false
-    }
-    $recordedStart = [DateTimeOffset]::Parse([string]$Batch.started_at).UtcDateTime
-    $observedStart = $process.StartTime.ToUniversalTime()
-    return [Math]::Abs(($observedStart - $recordedStart).TotalSeconds) -le 120
 }
 
 function Invoke-PythonCode([string]$Python, [string]$Code, [string[]]$Arguments) {
@@ -101,20 +89,54 @@ function Get-RunnerStatus([string]$ManifestPath, [bool]$FullArtifactCheck) {
     Assert-SourceProvenance $payload
     Invoke-PythonValidation $ManifestPath $FullArtifactCheck
     $python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
-    $granularJson = @(
-        & $python -m stock_ai research campaign-status --campaign-manifest $ManifestPath
-    )
+    # Read checkpoint progress without calling campaign._process_is_running.
+    # Python's POSIX-style os.kill(pid, 0) probe is not a safe Windows process
+    # query and can raise WinError 87. Process identity is classified below by
+    # Get-WorkerProcessState instead.
+    $granularReader = @'
+import json
+from pathlib import Path
+import sys
+from stock_ai.ml.campaign import campaign_batch_checkpoint_path, load_campaign_manifest
+from stock_ai.ml.checkpoint import read_checkpoint_status
+
+manifest = load_campaign_manifest(Path(sys.argv[1]).resolve())
+batches = []
+for batch in manifest.batches:
+    checkpoint_path = campaign_batch_checkpoint_path(manifest, batch)
+    summary = None
+    if checkpoint_path is not None and checkpoint_path.is_dir():
+        checkpoint = read_checkpoint_status(checkpoint_path)
+        units = checkpoint["units"]
+        latest = max(units.values(), key=lambda item: str(item.get("updated_at", "")), default=None)
+        active = tuple(value for value in units.values() if value.get("status") == "RUNNING")
+        current = max(active or tuple(units.values()), key=lambda item: str(item.get("updated_at", "")), default=None)
+        summary = {
+            "checkpoint_id": checkpoint["checkpoint_id"],
+            "updated_at": checkpoint["updated_at"],
+            "unit_counts": checkpoint["unit_counts"],
+            "active_units": active,
+            "current_unit": current,
+            "latest_unit": latest,
+        }
+    batches.append({"batch_id": batch.batch_id, "checkpoint": summary})
+print(json.dumps({"batches": batches}, ensure_ascii=False, sort_keys=True))
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($granularReader))
+    $bootstrap = "import base64;exec(base64.b64decode('$encoded'))"
+    $granularJson = @(& $python -c $bootstrap $ManifestPath)
     if ($LASTEXITCODE -ne 0) {
         throw 'read-only granular campaign status authentication failed'
     }
     $granular = ($granularJson -join [Environment]::NewLine) | ConvertFrom-Json
     $batches = @()
     foreach ($batch in $payload.batches) {
-        $workerAlive = Test-WorkerIdentity $batch
-        $effective = [string]$batch.status
-        if ($effective -eq 'RUNNING' -and -not $workerAlive) {
-            $effective = 'INTERRUPTED'
+        $workerState = $null
+        if ([string]$batch.status -eq 'RUNNING') {
+            $workerState = Get-WorkerProcessState $batch
         }
+        $effective = Get-EffectiveWorkerStatus ([string]$batch.status) $workerState
+        $workerAlive = ConvertTo-WorkerAlive $workerState
         $granularBatch = @($granular.batches | Where-Object {
             [string]$_.batch_id -eq [string]$batch.batch_id
         }) | Select-Object -First 1
@@ -136,6 +158,7 @@ function Get-RunnerStatus([string]$ManifestPath, [bool]$FullArtifactCheck) {
             stored_status = [string]$batch.status
             effective_status = $effective
             attempts = [int]$batch.attempts
+            worker_state = $workerState
             worker_alive = $workerAlive
             report_id = $batch.report_id
             last_error = $batch.last_error
@@ -203,6 +226,11 @@ function Invoke-Campaign([string]$ManifestPath, [string]$RunnerLogRoot) {
         Write-RunnerEvent $RunnerLogRoot 'ALREADY_RUNNING' (($active.batch_id) -join ',')
         return 0
     }
+    $unknown = @($status.batches | Where-Object { $_.effective_status -eq 'UNKNOWN' })
+    if ($unknown.Count -gt 0) {
+        Write-RunnerEvent $RunnerLogRoot 'WORKER_STATE_UNKNOWN' (($unknown.batch_id) -join ',')
+        return 0
+    }
     $stale = @($status.batches | Where-Object {
         $_.stored_status -eq 'RUNNING' -and $_.effective_status -eq 'INTERRUPTED'
     } | ForEach-Object { $_.batch_id })
@@ -268,7 +296,7 @@ if ($Action -eq 'status') {
         $status | ConvertTo-Json -Depth 6
     } else {
         "campaign=$($status.campaign_id) validation=$($status.validation) holdout_accessed=false"
-        $status.batches | Format-Table horizon, model_family, seed, current_task, current_fold, stored_status, effective_status, attempts, worker_alive -AutoSize
+        $status.batches | Format-Table horizon, model_family, seed, current_task, current_fold, stored_status, effective_status, attempts, worker_state -AutoSize
     }
     exit 0
 }

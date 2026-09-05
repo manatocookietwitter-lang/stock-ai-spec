@@ -731,3 +731,16 @@ candidate runnerはCodexから独立し、horizonを順に進め、各campaign�
 D073の認証済みcheckpointだけを再利用する。statusはfeature selectionに属する全horizon manifestを一度だけreadし、
 保存状態、worker実効状態、horizon / model / seed、activeまたは最新foldを返すだけで、manifest・worker・holdoutを変更しない。
 現行legacy campaignへこのsourceを途中適用せず、安全な完了境界後に新方式へ切り替える。
+
+### D076 — Windows worker生存判定はALIVE / DEAD / UNKNOWNの三状態にする
+
+Windows runnerはPythonのPOSIX式`os.kill(pid, 0)`をprocess生存確認に使わない。Windows PowerShellの
+`Get-Process -Id ... -ErrorAction Stop`でPIDを照会し、Python process名とmanifestへ保存した開始時刻を
+120秒以内で照合する。一致すれば`ALIVE`、PID不存在またはprocess名・開始時刻の明確な不一致は`DEAD`、
+`WinError 87`、`AccessDenied`、開始時刻取得失敗、予期しない照会例外は`UNKNOWN`とする。
+
+保存状態`RUNNING`を`INTERRUPTED`へ変更できるのは`DEAD`の場合だけとする。`UNKNOWN`ではstatusを成功終了して
+read-only表示し、runnerの自動復旧はmanifest変更・worker再起動・次batch起動を行わず安全側で終了する。
+これにより確認不能を死亡と誤認して同一workerを重複起動しない。PID再利用はprocess名だけで判断せず、開始時刻の
+不一致で明確に拒否する。動作中Ablation campaignのsource provenanceを維持するため、この修正はrunner / test / docsに
+限定し、model source、研究config、seed、feature、artifact、locked holdoutは変更しない。

@@ -30,6 +30,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'worker-state.ps1')
 
 function Resolve-ProjectPath([string]$PathValue) {
     if ([System.IO.Path]::IsPathRooted($PathValue)) {
@@ -57,23 +58,6 @@ function Assert-SourceProvenance([string]$Commit) {
     if ($LASTEXITCODE -ne 0 -or $untrackedSource.Count -gt 0) {
         throw 'untracked model source prevents candidate provenance authentication'
     }
-}
-
-function Test-WorkerIdentity($Batch) {
-    if ($null -eq $Batch.child_pid -or $null -eq $Batch.started_at) {
-        return $false
-    }
-    $process = Get-Process -Id ([int]$Batch.child_pid) -ErrorAction SilentlyContinue
-    if ($null -eq $process -or $process.ProcessName -notlike 'python*') {
-        return $false
-    }
-    try {
-        $recordedStart = [DateTimeOffset]::Parse([string]$Batch.started_at).UtcDateTime
-        $observedStart = $process.StartTime.ToUniversalTime()
-    } catch {
-        return $false
-    }
-    return [Math]::Abs(($observedStart - $recordedStart).TotalSeconds) -le 120
 }
 
 function Invoke-PythonCode([string]$Python, [string]$Code, [string[]]$Arguments) {
@@ -142,9 +126,21 @@ $env:PYTHONPATH = Join-Path $ProjectRoot 'src'
 Remove-Item Env:JQUANTS_API_KEY -ErrorAction SilentlyContinue
 
 function Get-CandidateStatus() {
-    $statusJson = @(& $python -m stock_ai research candidate-status `
-        --feature-selection $selectionPath `
-        --campaign-root $campaignPath)
+    # The CLI's legacy process probe uses os.kill(pid, 0), which is not a safe
+    # Windows query. Disable that read-only probe in this child; the runner
+    # performs a tri-state identity check with Get-Process below.
+    $statusReader = @'
+from pathlib import Path
+import sys
+import stock_ai.ml.campaign as campaign
+from stock_ai.cli import research_candidate_status
+
+campaign._process_is_running = lambda _pid: True
+research_candidate_status(feature_selection=Path(sys.argv[1]), campaign_root=Path(sys.argv[2]))
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($statusReader))
+    $bootstrap = "import base64;exec(base64.b64decode('$encoded'))"
+    $statusJson = @(& $python -c $bootstrap $selectionPath $campaignPath)
     if ($LASTEXITCODE -ne 0) {
         throw 'candidate status authentication failed'
     }
@@ -162,15 +158,14 @@ function Get-CandidateStatus() {
             if ($null -eq $batch) {
                 throw 'candidate status batch is absent from its authenticated manifest'
             }
-            $workerAlive = ([string]$batch.status -eq 'RUNNING') -and (Test-WorkerIdentity $batch)
+            $workerState = $null
+            if ([string]$batch.status -eq 'RUNNING') {
+                $workerState = Get-WorkerProcessState $batch
+            }
+            $workerAlive = ConvertTo-WorkerAlive $workerState
+            $batchStatus | Add-Member -NotePropertyName worker_state -NotePropertyValue $workerState -Force
             $batchStatus.worker_alive = $workerAlive
-            $batchStatus.effective_status = $(
-                if ([string]$batch.status -eq 'RUNNING' -and -not $workerAlive) {
-                    'INTERRUPTED'
-                } else {
-                    [string]$batch.status
-                }
-            )
+            $batchStatus.effective_status = Get-EffectiveWorkerStatus ([string]$batch.status) $workerState
         }
         $current = @($horizon.campaign.batches | Where-Object {
             [string]$_.effective_status -eq 'RUNNING'
@@ -217,6 +212,16 @@ try {
     )
     if ($active.Count -gt 0) {
         Write-RunnerEvent $logPath 'ALREADY_RUNNING' (($active.batch_id) -join ',')
+        exit 0
+    }
+    $unknown = @(
+        $status.horizons |
+            Where-Object { [string]$_.status -eq 'STARTED' } |
+            ForEach-Object { $_.campaign.batches } |
+            Where-Object { [string]$_.effective_status -eq 'UNKNOWN' }
+    )
+    if ($unknown.Count -gt 0) {
+        Write-RunnerEvent $logPath 'WORKER_STATE_UNKNOWN' (($unknown.batch_id) -join ',')
         exit 0
     }
     foreach ($horizon in $status.horizons) {

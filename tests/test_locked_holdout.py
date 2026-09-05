@@ -1183,6 +1183,7 @@ def test_candidate_runner_status_and_registration_are_read_only(tmp_path: Path) 
     current = reused_payload["horizons"][0]["campaign"]["current_batch"]
     assert current["stored_status"] == "RUNNING"
     assert current["effective_status"] == "INTERRUPTED"
+    assert current["worker_state"] == "DEAD"
     assert current["worker_alive"] is False
     assert campaign_path.read_bytes() == campaign_before
 
