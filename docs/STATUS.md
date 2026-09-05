@@ -531,3 +531,11 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - progress manifestはfoldの`RUNNING / INTERRUPTED / FAILED / SUCCEEDED`、attempt、artifactをatomic保存し、worker死後の`RUNNING`を`INTERRUPTED`へ回復する。成功表示とartifact欠損・Parquet / logical frame / metadata改ざんはfail closed
 - read-only granular status commandとWindows runnerのseed表示 / checkpoint-root引継ぎを追加。development checkpointはlocked holdoutを含まない
 - 隔離branch gate: Ruff pass、strict mypy 46 source pass、pytest 215 pass、branch coverage 85.03% pass。Production researchの同一testを連続2回実行してcache混線がないことも確認した
+
+## 2026-09-05 Goal 3 legacy base campaign完了
+
+- 独立runnerへ委譲したlegacy campaignは正常完了した。`goal3-base-v2.json`の1日LightGBM / XGBoost / CatBoost 3 batchと、`goal3-base-v3.json`の5日・20日LightGBM / XGBoost / CatBoost 6 batch、合計9 batchが認証可能な`SUCCEEDED` report / OOFを持つ
+- `goal3-base-v3.json`はcampaign `28f0c8df2ed45e5d345271a14ffcb9f7fc288998c4dd710ec10cf6e290b52558`、Production Build `2fc936a7ca9b939d8016ad3c5efea17c53ffd5264d5ece398a8329bf2f2dfe5f`を認証し、最終20日CatBoostは2026-09-05 15:27 JSTに完了した。全workerは終了済みで、locked holdoutは未開封
+- 5日regressionのmean daily Rank ICはLightGBM 0.036813、XGBoost 0.039487、CatBoost 0.019956。5日rankingは-0.002873、-0.001487、0.073736
+- 20日regressionのmean daily Rank ICはLightGBM 0.062259、XGBoost 0.064231、CatBoost 0.068081。20日rankingは0.034376、0.020157、0.103577
+- これらはseed 17、`run_ablations=false`、`run_diagnostics=false`のdevelopment-only基準実験であり、Champion選定の十分条件ではない。D073〜D075に従い、次は隔離branchを安全にmainへ統合して研究code / configを固定し、3 seed以上のv2 Feature Ablation campaignへ進む
