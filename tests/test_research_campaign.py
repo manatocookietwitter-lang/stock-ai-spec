@@ -10,16 +10,21 @@ import pytest
 from typer.testing import CliRunner
 
 from stock_ai.cli import _advanced_campaign_child_command, app
+from stock_ai.features import V2_EXTENDED_MANIFEST
+from stock_ai.ml.advanced import AdvancedResearchConfig
 from stock_ai.ml.campaign import (
     CampaignBatchStatus,
     authenticate_batch_artifact,
+    campaign_batch_checkpoint_path,
     create_campaign_manifest,
     discover_batch_artifact,
     load_campaign_build_id,
     load_campaign_manifest,
+    read_campaign_status,
     reconcile_campaign,
     write_campaign_manifest,
 )
+from stock_ai.ml.checkpoint import ResearchCheckpointStore
 
 
 def _manifest(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -49,6 +54,26 @@ def _manifest(tmp_path: Path):  # type: ignore[no-untyped-def]
         },
         now=datetime(2026, 9, 4, tzinfo=UTC),
     )
+
+
+def _write_authenticated_build_marker(tmp_path: Path) -> Path:
+    build_id = "b" * 64
+    directory = tmp_path / build_id
+    directory.mkdir(exist_ok=True)
+    path = (directory / f"{build_id}.json").resolve()
+    payload = {
+        "build_id": build_id,
+        "manifest_path": str(path),
+        "dataset_snapshot_id": "d" * 64,
+        "v2_snapshot_id": "f" * 64,
+    }
+    payload["metadata_hash"] = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def test_campaign_manifest_is_atomic_round_trip_and_plan_authenticated(tmp_path: Path) -> None:
@@ -86,16 +111,8 @@ def test_campaign_manifest_missing_or_invalid_is_fail_closed(tmp_path: Path) -> 
 
 def test_campaign_build_marker_is_authenticated_without_loading_parquet(tmp_path: Path) -> None:
     build_id = "b" * 64
-    directory = tmp_path / build_id
-    directory.mkdir()
-    path = (directory / f"{build_id}.json").resolve()
-    payload = {"build_id": build_id, "manifest_path": str(path), "dataset": "metadata-only"}
-    payload["metadata_hash"] = hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ).hexdigest()
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    path = _write_authenticated_build_marker(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert load_campaign_build_id(path) == build_id
 
@@ -103,6 +120,95 @@ def test_campaign_build_marker_is_authenticated_without_loading_parquet(tmp_path
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RuntimeError, match="metadata hash mismatch"):
         load_campaign_build_id(path)
+
+
+def test_v2_campaign_status_is_read_only_and_includes_latest_fold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    build_path = _write_authenticated_build_marker(tmp_path)
+    legacy = _manifest(tmp_path)
+    manifest = create_campaign_manifest(
+        build_id=legacy.build_id,
+        build_manifest_path=build_path,
+        code_commit=legacy.code_commit,
+        report_root=Path(legacy.report_root),
+        experiment_registry=Path(legacy.experiment_registry),
+        horizons=(5,),
+        model_families=("lightgbm",),
+        common_config=legacy.common_config,
+        checkpoint_root=tmp_path / "checkpoints",
+        now=datetime(2026, 9, 4, tzinfo=UTC),
+    )
+    batch = manifest.batches[0]
+    batch.status = CampaignBatchStatus.RUNNING
+    batch.child_pid = 123
+    batch.attempts = 2
+    campaign_path = tmp_path / "campaign-v2.json"
+    write_campaign_manifest(manifest, campaign_path)
+
+    config = AdvancedResearchConfig.model_validate(
+        {
+            **{
+                key: value
+                for key, value in manifest.common_config.items()
+                if key != "feature_names"
+            },
+            "horizons": (5,),
+            "model_families": ("lightgbm",),
+            "seeds": (17,),
+        }
+    )
+    provenance = {
+        "data_snapshot_id": "d" * 64,
+        "feature_snapshot_id": "f" * 64,
+        "feature_manifest_hash": V2_EXTENDED_MANIFEST.manifest_hash,
+        "feature_names": ["return_1d"],
+        "code_commit": manifest.code_commit,
+        "config": config.model_dump(mode="json"),
+        "config_hash": config.config_hash,
+        "locked_holdout_accessed": False,
+    }
+    evidence = {
+        "horizon": 5,
+        "model_family": "lightgbm",
+        "task": "ranking",
+        "seed": 17,
+        "fold": 3,
+    }
+    with ResearchCheckpointStore(tmp_path / "checkpoints", provenance=provenance) as store:
+        store.begin_fold(evidence)
+        checkpoint_path = store.path
+
+    assert campaign_batch_checkpoint_path(manifest, batch) == checkpoint_path
+    manifest_before = campaign_path.read_bytes()
+    progress_path = checkpoint_path / "progress.json"
+    progress_before = progress_path.read_bytes()
+    monkeypatch.setattr("stock_ai.ml.campaign._process_is_running", lambda _pid: True)
+
+    status = read_campaign_status(campaign_path)
+    observed = status["batches"]
+    assert isinstance(observed, tuple)
+    assert observed[0]["horizon"] == 5
+    assert observed[0]["model_family"] == "lightgbm"
+    assert observed[0]["seed"] == 17
+    assert observed[0]["effective_status"] == "RUNNING"
+    assert observed[0]["worker_alive"] is True
+    checkpoint = observed[0]["checkpoint"]
+    assert checkpoint["unit_counts"] == {"RUNNING": 1}
+    assert checkpoint["current_unit"]["evidence"] == evidence
+    assert checkpoint["latest_unit"]["evidence"] == evidence
+    assert status["current_batch"] == observed[0]
+    assert campaign_path.read_bytes() == manifest_before
+    assert progress_path.read_bytes() == progress_before
+
+    cli_result = CliRunner().invoke(
+        app,
+        ["research", "campaign-status", "--campaign-manifest", str(campaign_path)],
+    )
+    assert cli_result.exit_code == 0
+    assert '"fold": 3' in cli_result.stdout
+    assert campaign_path.read_bytes() == manifest_before
+    assert progress_path.read_bytes() == progress_before
 
 
 def test_reconcile_marks_stale_running_batch_interrupted(tmp_path: Path) -> None:
@@ -222,6 +328,63 @@ def test_campaign_child_command_contains_no_credentials(tmp_path: Path) -> None:
     assert "--no-run-diagnostics" in command
     assert command[1] == "-c"
     assert "from stock_ai.cli import app; app()" in command[2]
+
+
+def test_v2_campaign_splits_every_seed_and_authenticates_child_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    legacy = _manifest(tmp_path)
+    manifest = create_campaign_manifest(
+        build_id=legacy.build_id,
+        build_manifest_path=Path(legacy.build_manifest_path),
+        code_commit=legacy.code_commit,
+        report_root=Path(legacy.report_root),
+        experiment_registry=Path(legacy.experiment_registry),
+        horizons=(1,),
+        model_families=("lightgbm",),
+        common_config={**legacy.common_config, "seeds": (17, 29)},
+        checkpoint_root=tmp_path / "checkpoints",
+        now=datetime(2026, 9, 4, tzinfo=UTC),
+    )
+    assert manifest.schema_version == "research-campaign-manifest-v2"
+    assert [batch.batch_id for batch in manifest.batches] == [
+        "h1-lightgbm-s17",
+        "h1-lightgbm-s29",
+    ]
+    assert [batch.seed for batch in manifest.batches] == [17, 29]
+    batch = manifest.batches[1]
+    command = _advanced_campaign_child_command(
+        build_manifest=Path(manifest.build_manifest_path),
+        code_commit=manifest.code_commit,
+        report_root=Path(manifest.report_root),
+        experiment_registry=Path(manifest.experiment_registry),
+        horizon=batch.horizon,
+        model_family=batch.model_family,
+        common_config=manifest.common_config,
+        seed=batch.seed,
+        checkpoint_root=Path(str(manifest.checkpoint_root)),
+    )
+    assert command[command.index("--seeds") + 1] == "29"
+    assert command[command.index("--checkpoint-root") + 1] == str(
+        (tmp_path / "checkpoints").resolve()
+    )
+
+    report = SimpleNamespace(
+        report_id="r" * 64,
+        config_hash=batch.config_hash,
+        code_commit=manifest.code_commit,
+        config=SimpleNamespace(horizons=(1,), model_families=("lightgbm",), seeds=(17,)),
+        feature_names=("return_1d",),
+    )
+    monkeypatch.setattr(
+        "stock_ai.ml.campaign.load_advanced_research_run", lambda _path: (report, object())
+    )
+    with pytest.raises(RuntimeError, match="seed mismatch"):
+        authenticate_batch_artifact(
+            batch,
+            code_commit=manifest.code_commit,
+            oof_path=tmp_path / "oof.parquet",
+        )
 
 
 class _CompletedProcess:

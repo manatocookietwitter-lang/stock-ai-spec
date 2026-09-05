@@ -81,6 +81,29 @@ def test_today_and_home_keep_proposal_and_actual_portfolio_separate(tmp_path: Pa
     assert validation["monthly_readouts"] == []
 
 
+def test_api_default_business_date_uses_an_aware_injected_clock(tmp_path: Path) -> None:
+    database = tmp_path / "clock.sqlite3"
+    store = OperationalStore(database)
+    proposal_id = bootstrap_goal5_fixture(store, as_of=AS_OF)
+    current = AS_OF + timedelta(minutes=30)
+    client = TestClient(
+        create_app(database, clock=lambda: current),
+        base_url="http://127.0.0.1",
+    )
+
+    today = client.get("/api/v1/today")
+    assert today.status_code == 200
+    assert today.json()["businessDate"] == AS_OF.date().isoformat()
+    assert today.json()["proposal"]["proposalId"] == proposal_id
+
+    invalid_clock = TestClient(
+        create_app(database, clock=lambda: datetime(2026, 1, 1)),
+        base_url="http://127.0.0.1",
+    )
+    with pytest.raises(RuntimeError, match="clock must be timezone-aware"):
+        invalid_clock.get("/api/v1/today")
+
+
 def test_manual_intent_header_is_required_and_saving_never_submits_order(
     tmp_path: Path,
 ) -> None:

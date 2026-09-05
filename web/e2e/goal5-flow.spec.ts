@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test("Today review change, partial fill, apply, and next Home use the live local API", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-01-08T03:00:00.000Z"));
   await page.goto("/today");
   await expect(page.getByRole("heading", { name: "今日", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "判断を確認" }).click();

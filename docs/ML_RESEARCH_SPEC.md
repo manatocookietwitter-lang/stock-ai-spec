@@ -394,6 +394,30 @@ rejection reason
 
 全特徴を同時に足した一度の結果だけで採否を決めない。
 
+## 7.2 長時間研究の中断・再開
+
+- local runnerはCodex processから独立し、Windows再起動後も同じcampaign manifestから再開する
+- 新規campaignは`model family × horizon × seed`をbatch境界とする
+- batch内はOptuna studyとwalk-forward foldを永続化し、認証済み完了単位を再計算しない
+- fold identityはDataset、Feature、code、config、parameter、seed、split境界を含む
+- `RUNNING`のworkerが消えた状態は`INTERRUPTED`として保持し、成功に書き換えない
+- artifact / config / Dataset / Feature / code hash不一致はfail closedする
+- 進捗照会はread-onlyとし、周期的なPID / CPU pollingを必須にしない
+- development checkpointへlocked final holdoutのrow、label、metricを保存しない
+
+## 7.3 Development選択の固定とlocked holdout単回評価
+
+- feature familyはablation campaignのstrictly-earlier tuning evidenceをseedごとに集約し、3 seed以上のうち3分の2以上が支持したものだけをhorizon別に固定する
+- vote結果はfinal-candidate開始前に、Production Build / Dataset / Feature / code / seed / holdout境界とexact feature列を持つcontent-addressed中間artifactへ固定する
+- final-candidate campaignは固定済みfeature列だけで、LightGBM / XGBoost / CatBoost、1 / 5 / 20日、3 seed以上、regression / ranking / quantile / large-lossを完走する
+- model、feature、hyperparameter、ensemble weight、uncertaintyの選択はpurged development OOFだけで完了し、一つのcontent-addressed selection artifactとして保存する
+- 選択artifactはProduction Build、Dataset / Feature snapshot、feature definition、campaign / report / code identity、holdout境界を認証し、`locked_holdout_accessed=false`を固定する
+- locked holdout evaluatorは、選択artifactへ一つのledger path、evaluator commit、Build / Dataset identityをholdout読込前に一度だけ紐付ける
+- 中断時はmodel component単位のtargetを含まないprediction artifactから再開し、成功済みcomponentを再fitしない。生存workerが所有するOS lockと競合した場合は二重実行を拒否する
+- 完了reportは全component hash、固定ensemble、holdout期間、選択済みfeature definition hashを再認証し、Experiment Registryへ`locked_holdout_accessed=true`かつ`research_only`で一度だけ追記する
+- holdout結果を理由にfeature、model、parameter、ensemble weightを変更しない。結果が悪くても同じholdoutを開き直さず、Champion候補の不採用または将来のlive OOS観測へ進む
+- holdout評価はmodel採用を意味せず、historical revision制約、live OOS evidence、明示承認が残る間は`adoption_eligible=false`とする
+
 ## 8. 固定実験一覧
 
 | ID | 実験 |

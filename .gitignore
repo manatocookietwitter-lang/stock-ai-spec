@@ -26,6 +26,7 @@ artifacts/models/
 artifacts/reports/
 artifacts/quarantine/
 artifacts/campaigns/
+artifacts/checkpoints/
 artifacts/logs/
 .demo-artifacts/
 *.duckdb

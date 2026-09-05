@@ -37,6 +37,7 @@ from sklearn.metrics import brier_score_loss, log_loss, mean_pinball_loss
 from stock_ai.data.contracts import CapabilityStatus
 from stock_ai.domain import Prediction, PredictionUncertainty
 from stock_ai.features import FEATURE_REGISTRY, V0_MANIFEST, V2_EXTENDED_MANIFEST
+from stock_ai.ml.checkpoint import ResearchCheckpointStore, stable_hash
 from stock_ai.ml.dataset import HORIZONS
 from stock_ai.ml.research_metrics import (
     RankingMetrics,
@@ -501,6 +502,62 @@ class FoldPreprocessor:
         return numeric
 
 
+def _index_sequence_hash(values: Sequence[int]) -> str:
+    array = np.asarray(values, dtype="<i8")
+    return hashlib.sha256(array.tobytes(order="C")).hexdigest()
+
+
+def _fold_checkpoint_evidence(
+    *,
+    checkpoint_scope: str,
+    fold_number: int,
+    train_indices: Sequence[int],
+    validation_indices: Sequence[int],
+    train: pd.DataFrame,
+    validation: pd.DataFrame,
+    feature_names: tuple[str, ...],
+    target_column: str,
+    label_end_column: str,
+    horizon: int,
+    family: ModelFamily,
+    task: ModelTask,
+    seed: int,
+    parameters: Mapping[str, int | float],
+    config: AdvancedResearchConfig,
+    validation_not_before: pd.Timestamp | None,
+) -> dict[str, object]:
+    """Bind a reusable fold to exact deterministic split and model inputs."""
+
+    train_dates = pd.to_datetime(train["trading_date"])
+    validation_dates = pd.to_datetime(validation["trading_date"])
+    return {
+        "checkpoint_scope": checkpoint_scope,
+        "fold": fold_number,
+        "train_indices_sha256": _index_sequence_hash(train_indices),
+        "validation_indices_sha256": _index_sequence_hash(validation_indices),
+        "train_rows": len(train),
+        "validation_rows": len(validation),
+        "train_start": pd.Timestamp(train_dates.min()).isoformat(),
+        "train_end": pd.Timestamp(train_dates.max()).isoformat(),
+        "validation_start": pd.Timestamp(validation_dates.min()).isoformat(),
+        "validation_end": pd.Timestamp(validation_dates.max()).isoformat(),
+        "validation_not_before": (
+            None
+            if validation_not_before is None
+            else pd.Timestamp(validation_not_before).isoformat()
+        ),
+        "feature_names": list(feature_names),
+        "target_column": target_column,
+        "label_end_column": label_end_column,
+        "horizon": horizon,
+        "model_family": family,
+        "task": task,
+        "seed": seed,
+        "parameters": dict(parameters),
+        "config_hash": config.config_hash,
+    }
+
+
 def generate_oof_predictions(
     frame: pd.DataFrame,
     *,
@@ -515,6 +572,8 @@ def generate_oof_predictions(
     config: AdvancedResearchConfig,
     validation_not_before: pd.Timestamp | None = None,
     progress_sink: list[pd.DataFrame] | None = None,
+    checkpoint_store: ResearchCheckpointStore | None = None,
+    checkpoint_scope: str = "oof",
 ) -> pd.DataFrame:
     """Generate one model's OOF predictions using only each fold's training rows."""
 
@@ -552,45 +611,87 @@ def generate_oof_predictions(
             ]
         if train.empty or validation.empty:
             continue
-        preprocessor = FoldPreprocessor(
-            feature_names,
-            lower_quantile=config.clip_lower_quantile,
-            upper_quantile=config.clip_upper_quantile,
-            correlation_threshold=config.correlation_threshold,
-        ).fit(train)
-        train_x = preprocessor.transform(train)
-        validation_x = preprocessor.transform(validation)
-        train_target = train[target_column].astype(float)
-        prediction = _fit_predict(
+        checkpoint_evidence = _fold_checkpoint_evidence(
+            checkpoint_scope=checkpoint_scope,
+            fold_number=fold.fold_number,
+            train_indices=fold.train_indices,
+            validation_indices=fold.validation_indices,
+            train=train,
+            validation=validation,
+            feature_names=feature_names,
+            target_column=target_column,
+            label_end_column=label_end_column,
+            horizon=horizon,
             family=family,
             task=task,
-            train_x=train_x,
-            train_target=train_target,
-            train_dates=train["trading_date"],
-            validation_x=validation_x,
             seed=seed,
             parameters=parameters,
             config=config,
+            validation_not_before=validation_not_before,
         )
-        prediction_array = np.asarray(prediction, dtype=float)
-        if prediction_array.ndim != 1 or len(prediction_array) != len(validation):
-            raise RuntimeError("model emitted a prediction vector with the wrong row count")
-        if not np.isfinite(prediction_array).all():
-            raise RuntimeError("model emitted non-finite fold predictions")
-        identity_columns = ["symbol", "trading_date"]
-        if "as_of" in validation.columns:
-            identity_columns.append("as_of")
-        output = validation.loc[
-            :, [*identity_columns, target_column, label_end_column]
-        ].copy()
-        output = output.rename(columns={target_column: "target", label_end_column: "label_end"})
-        output["horizon"] = horizon
-        output["model_family"] = family
-        output["task"] = task
-        output["seed"] = seed
-        output["fold"] = fold.fold_number
-        output["prediction"] = prediction_array
-        output["retained_feature_count"] = len(preprocessor.retained_features)
+        output = (
+            checkpoint_store.load_fold(checkpoint_evidence, frame_hash=_frame_hash)
+            if checkpoint_store is not None
+            else None
+        )
+        if output is None:
+            if checkpoint_store is not None:
+                checkpoint_store.begin_fold(checkpoint_evidence)
+            try:
+                preprocessor = FoldPreprocessor(
+                    feature_names,
+                    lower_quantile=config.clip_lower_quantile,
+                    upper_quantile=config.clip_upper_quantile,
+                    correlation_threshold=config.correlation_threshold,
+                ).fit(train)
+                train_x = preprocessor.transform(train)
+                validation_x = preprocessor.transform(validation)
+                train_target = train[target_column].astype(float)
+                prediction = _fit_predict(
+                    family=family,
+                    task=task,
+                    train_x=train_x,
+                    train_target=train_target,
+                    train_dates=train["trading_date"],
+                    validation_x=validation_x,
+                    seed=seed,
+                    parameters=parameters,
+                    config=config,
+                )
+                prediction_array = np.asarray(prediction, dtype=float)
+                if prediction_array.ndim != 1 or len(prediction_array) != len(validation):
+                    raise RuntimeError("model emitted a prediction vector with the wrong row count")
+                if not np.isfinite(prediction_array).all():
+                    raise RuntimeError("model emitted non-finite fold predictions")
+                identity_columns = ["symbol", "trading_date"]
+                if "as_of" in validation.columns:
+                    identity_columns.append("as_of")
+                output = validation.loc[
+                    :, [*identity_columns, target_column, label_end_column]
+                ].copy()
+                output = output.rename(
+                    columns={target_column: "target", label_end_column: "label_end"}
+                )
+                output["horizon"] = horizon
+                output["model_family"] = family
+                output["task"] = task
+                output["seed"] = seed
+                output["fold"] = fold.fold_number
+                output["prediction"] = prediction_array
+                output["retained_feature_count"] = len(preprocessor.retained_features)
+                if checkpoint_store is not None:
+                    checkpoint_store.publish_fold(
+                        checkpoint_evidence,
+                        output,
+                        frame_hash=_frame_hash,
+                    )
+            except Exception as exc:
+                if checkpoint_store is not None:
+                    checkpoint_store.fail_fold(
+                        checkpoint_evidence,
+                        error_code=type(exc).__name__,
+                    )
+                raise
         outputs.append(output)
         if progress_sink is not None:
             progress_sink.append(output)
@@ -614,6 +715,7 @@ def bounded_optuna_search(
     horizon: int,
     family: ModelFamily,
     config: AdvancedResearchConfig,
+    checkpoint_store: ResearchCheckpointStore | None = None,
 ) -> TuningResult:
     """Tune on development OOF only; this function receives no holdout rows."""
 
@@ -633,6 +735,8 @@ def bounded_optuna_search(
                 seed=config.seeds[0],
                 parameters=parameters,
                 config=config,
+                checkpoint_store=checkpoint_store,
+                checkpoint_scope="optuna-tuning",
             )
             metrics = evaluate_cross_sectional_predictions(
                 dates=oof["trading_date"],
@@ -648,19 +752,79 @@ def bounded_optuna_search(
             )
             raise
 
-    study = optuna.create_study(
-        direction="maximize",
-        sampler=TPESampler(seed=config.seeds[0]),
-    )
-    study.optimize(
-        objective,
-        n_trials=config.tuning_trials,
-        timeout=config.tuning_timeout_seconds,
-        n_jobs=1,
-        show_progress_bar=False,
-        gc_after_trial=True,
-        catch=(Exception,),
-    )
+    storage: optuna.storages.RDBStorage | None = None
+    if checkpoint_store is None:
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=TPESampler(seed=config.seeds[0]),
+        )
+        remaining_trials = config.tuning_trials
+        remaining_timeout = float(config.tuning_timeout_seconds)
+    else:
+        study_evidence = {
+            "checkpoint_id": checkpoint_store.checkpoint_id,
+            "horizon": horizon,
+            "model_family": family,
+            "target_column": target_column,
+            "label_end_column": label_end_column,
+            "feature_names": list(feature_names),
+            "config_hash": config.config_hash,
+            "seed": config.seeds[0],
+        }
+        study_identity = stable_hash(study_evidence)
+        database = checkpoint_store.optuna_database_path
+        storage = optuna.storages.RDBStorage(
+            url=f"sqlite:///{database.as_posix()}",
+        )
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=TPESampler(seed=config.seeds[0]),
+            storage=storage,
+            study_name=f"advanced-{study_identity}",
+            load_if_exists=True,
+        )
+        expected_attributes = {
+            "provenance": {
+                "schema_version": "advanced-optuna-study-v1",
+                "study_identity": study_identity,
+                "evidence": study_evidence,
+            }
+        }
+        if study.user_attrs:
+            if study.user_attrs != expected_attributes:
+                storage.remove_session()
+                raise RuntimeError("persistent Optuna study provenance mismatch")
+        else:
+            if study.trials:
+                storage.remove_session()
+                raise RuntimeError("persistent Optuna study provenance is missing")
+            study.set_user_attr("provenance", expected_attributes["provenance"])
+        for prior in study.get_trials(deepcopy=False):
+            if prior.state is optuna.trial.TrialState.RUNNING:
+                study.tell(prior.number, state=optuna.trial.TrialState.FAIL)
+        terminal_states = {
+            optuna.trial.TrialState.COMPLETE,
+            optuna.trial.TrialState.PRUNED,
+            optuna.trial.TrialState.FAIL,
+        }
+        finished = [trial for trial in study.trials if trial.state in terminal_states]
+        remaining_trials = max(0, config.tuning_trials - len(finished))
+        elapsed = sum(
+            trial.duration.total_seconds()
+            for trial in finished
+            if trial.duration is not None
+        )
+        remaining_timeout = max(0.0, config.tuning_timeout_seconds - elapsed)
+    if remaining_trials > 0 and remaining_timeout > 0:
+        study.optimize(
+            objective,
+            n_trials=remaining_trials,
+            timeout=remaining_timeout,
+            n_jobs=1,
+            show_progress_bar=False,
+            gc_after_trial=True,
+            catch=(Exception,),
+        )
     trial_audits = tuple(
         TrialAudit(
             number=trial.number,
@@ -679,6 +843,8 @@ def bounded_optuna_search(
         for trial in study.trials
     )
     completed = [trial for trial in study.trials if trial.state is optuna.trial.TrialState.COMPLETE]
+    if storage is not None:
+        storage.remove_session()
     if not completed:
         raise TuningSearchError(
             f"BLOCKED_BY_VALIDATION: tuning failed for {family}/{horizon}d",
@@ -768,6 +934,64 @@ def _fit_predict(
     model = _regressor(family, task=task, seed=seed, parameters=parameters, config=config)
     model.fit(train_x, train_target)
     return np.asarray(model.predict(validation_x), dtype=float)
+
+
+def fit_predict_frozen_model(
+    training: pd.DataFrame,
+    prediction_frame: pd.DataFrame,
+    *,
+    feature_names: tuple[str, ...],
+    target_column: str,
+    horizon: int,
+    family: ModelFamily,
+    task: ModelTask,
+    seed: int,
+    parameters: Mapping[str, int | float],
+    config: AdvancedResearchConfig,
+) -> np.ndarray:
+    """Refit one already-selected component without inspecting evaluation outcomes."""
+
+    if (
+        config.horizons != (horizon,)
+        or config.model_families != (family,)
+        or config.seeds != (seed,)
+    ):
+        raise ValueError("frozen model identity does not match its source config")
+    required_training = {"trading_date", target_column, *feature_names}
+    required_prediction = set(feature_names)
+    if missing := sorted(required_training - set(training.columns)):
+        raise ValueError(f"frozen model training frame is missing: {', '.join(missing)}")
+    if missing := sorted(required_prediction - set(prediction_frame.columns)):
+        raise ValueError(f"frozen model prediction frame is missing: {', '.join(missing)}")
+    train = training.loc[training[target_column].notna()].sort_values(
+        ["trading_date", "symbol"] if "symbol" in training.columns else ["trading_date"],
+        kind="stable",
+    )
+    if train.empty or prediction_frame.empty:
+        raise ValueError("frozen model requires non-empty training and prediction rows")
+    preprocessor = FoldPreprocessor(
+        feature_names,
+        lower_quantile=config.clip_lower_quantile,
+        upper_quantile=config.clip_upper_quantile,
+        correlation_threshold=config.correlation_threshold,
+    ).fit(train)
+    prediction = _fit_predict(
+        family=family,
+        task=task,
+        train_x=preprocessor.transform(train),
+        train_target=train[target_column].astype(float),
+        train_dates=train["trading_date"],
+        validation_x=preprocessor.transform(prediction_frame),
+        seed=seed,
+        parameters=parameters,
+        config=config,
+    )
+    values = np.asarray(prediction, dtype=float)
+    if values.ndim != 1 or len(values) != len(prediction_frame):
+        raise RuntimeError("frozen model emitted a prediction vector with the wrong row count")
+    if not np.isfinite(values).all():
+        raise RuntimeError("frozen model emitted non-finite predictions")
+    return values
 
 
 def _regressor(
@@ -1626,49 +1850,72 @@ def run_advanced_research(
     feature_snapshot_id: str,
     feature_manifest_hash: str,
     feature_names: tuple[str, ...] = V2_EXTENDED_MANIFEST.feature_names,
+    checkpoint_root: Path | None = None,
 ) -> AdvancedResearchRun:
     """Run Goal 3 research and preserve partial progress if a later stage fails."""
 
     progress = _AdvancedResearchProgress()
+    checkpoint_store = (
+        ResearchCheckpointStore(
+            checkpoint_root,
+            provenance={
+                "data_snapshot_id": data_snapshot_id,
+                "feature_snapshot_id": feature_snapshot_id,
+                "feature_manifest_hash": feature_manifest_hash,
+                "feature_names": list(feature_names),
+                "code_commit": code_commit,
+                "config": config.model_dump(mode="json"),
+                "config_hash": config.config_hash,
+                "locked_holdout_accessed": False,
+            },
+        )
+        if checkpoint_root is not None
+        else None
+    )
     try:
-        return _run_advanced_research(
-            dataset,
-            data_snapshot_id=data_snapshot_id,
-            created_at=created_at,
-            code_commit=code_commit,
-            config=config,
-            feature_snapshot_id=feature_snapshot_id,
-            feature_manifest_hash=feature_manifest_hash,
-            feature_names=feature_names,
-            progress=progress,
-        )
-    except Exception as exc:
-        if isinstance(exc, AdvancedResearchExecutionError):
-            raise
-        trial_contexts = (
-            exc.trial_contexts
-            if isinstance(exc, TuningSearchError)
-            else tuple(
-                (result.horizon, result.model_family, trial)
-                for result in progress.tuning_results
-                for trial in result.trials
+        try:
+            return _run_advanced_research(
+                dataset,
+                data_snapshot_id=data_snapshot_id,
+                created_at=created_at,
+                code_commit=code_commit,
+                config=config,
+                feature_snapshot_id=feature_snapshot_id,
+                feature_manifest_hash=feature_manifest_hash,
+                feature_names=feature_names,
+                progress=progress,
+                checkpoint_store=checkpoint_store,
             )
-        )
-        fold_results: tuple[AdvancedFoldResult, ...] = ()
-        if progress.oof_parts:
-            try:
-                partial_oof = pd.concat(progress.oof_parts, ignore_index=True)
-                fold_results = _summarize_fold_results(
-                    partial_oof,
-                    large_loss_threshold=config.large_loss_threshold,
+        except Exception as exc:
+            if isinstance(exc, AdvancedResearchExecutionError):
+                raise
+            trial_contexts = (
+                exc.trial_contexts
+                if isinstance(exc, TuningSearchError)
+                else tuple(
+                    (result.horizon, result.model_family, trial)
+                    for result in progress.tuning_results
+                    for trial in result.trials
                 )
-            except Exception:
-                fold_results = ()
-        raise AdvancedResearchExecutionError(
-            str(exc),
-            trial_contexts=trial_contexts,
-            fold_results=fold_results,
-        ) from exc
+            )
+            fold_results: tuple[AdvancedFoldResult, ...] = ()
+            if progress.oof_parts:
+                try:
+                    partial_oof = pd.concat(progress.oof_parts, ignore_index=True)
+                    fold_results = _summarize_fold_results(
+                        partial_oof,
+                        large_loss_threshold=config.large_loss_threshold,
+                    )
+                except Exception:
+                    fold_results = ()
+            raise AdvancedResearchExecutionError(
+                str(exc),
+                trial_contexts=trial_contexts,
+                fold_results=fold_results,
+            ) from exc
+    finally:
+        if checkpoint_store is not None:
+            checkpoint_store.close()
 
 
 def _run_advanced_research(
@@ -1682,6 +1929,7 @@ def _run_advanced_research(
     feature_manifest_hash: str,
     feature_names: tuple[str, ...],
     progress: _AdvancedResearchProgress,
+    checkpoint_store: ResearchCheckpointStore | None,
 ) -> AdvancedResearchRun:
     """Internal implementation with progress containers owned by the public boundary."""
 
@@ -1772,6 +2020,7 @@ def _run_advanced_research(
                     horizon=horizon,
                     family=family,
                     config=config,
+                    checkpoint_store=checkpoint_store,
                 )
             except TuningSearchError as exc:
                 prior_trials = tuple(
@@ -1808,6 +2057,8 @@ def _run_advanced_research(
                         config=config,
                         validation_not_before=stages.model_evaluation_start,
                         progress_sink=oof_parts,
+                        checkpoint_store=checkpoint_store,
+                        checkpoint_scope="outer-model-evaluation",
                     )
         if config.run_ablations:
             ablation_results.extend(
@@ -1821,6 +2072,7 @@ def _run_advanced_research(
                     parameters={},
                     config=config,
                     validation_not_before=stages.model_evaluation_start,
+                    checkpoint_store=checkpoint_store,
                 )
             )
         if config.run_diagnostics:
@@ -1969,6 +2221,53 @@ def load_advanced_research_run(
 ) -> tuple[AdvancedResearchReport, pd.DataFrame]:
     """Authenticate an advanced report bundle before downstream use."""
 
+    parquet_path, report, parquet_sha256 = _authenticate_advanced_research_bundle(
+        parquet_path
+    )
+    frame = pd.read_parquet(parquet_path)
+    if _file_sha256(parquet_path) != parquet_sha256:
+        raise RuntimeError("advanced research Parquet changed while it was being read")
+    if len(frame) != report.oof_rows or _frame_hash(frame) != report.oof_sha256:
+        raise RuntimeError("advanced research OOF content identity mismatch")
+    return report, frame
+
+
+def load_authenticated_advanced_oof_slice(
+    parquet_path: Path,
+    *,
+    tasks: tuple[ModelTask, ...],
+) -> tuple[AdvancedResearchReport, pd.DataFrame]:
+    """Read selected OOF tasks without materializing unrelated authenticated rows.
+
+    The immutable Parquet byte hash and report identity are authenticated before and after
+    the filtered read. The full logical-frame hash remains verified when a campaign first
+    enters development selection through :func:`load_advanced_research_run`.
+    """
+
+    if not tasks or len(tasks) != len(set(tasks)) or not set(tasks) <= set(_TASKS):
+        raise ValueError("authenticated OOF tasks must be a unique non-empty task subset")
+    parquet_path, report, parquet_sha256 = _authenticate_advanced_research_bundle(
+        parquet_path
+    )
+    columns = ("symbol", "trading_date", "target", "label_end", "prediction", "task")
+    frame = pd.read_parquet(
+        parquet_path,
+        columns=list(columns),
+        filters=[("task", "in", list(tasks))],
+    )
+    if _file_sha256(parquet_path) != parquet_sha256:
+        raise RuntimeError("advanced research Parquet changed while it was being read")
+    if tuple(frame.columns) != columns:
+        raise RuntimeError("advanced research filtered OOF schema mismatch")
+    observed_tasks = set(frame["task"].astype(str).unique())
+    if not observed_tasks <= set(tasks):
+        raise RuntimeError("advanced research filtered OOF contains an unrequested task")
+    return report, frame
+
+
+def _authenticate_advanced_research_bundle(
+    parquet_path: Path,
+) -> tuple[Path, AdvancedResearchReport, str]:
     parquet_path = parquet_path.resolve()
     report_id = parquet_path.name.removesuffix(".oof.parquet")
     if parquet_path.parent.name != report_id:
@@ -1987,17 +2286,15 @@ def load_advanced_research_run(
         raise RuntimeError("advanced research metadata hash mismatch")
     if Path(str(payload.get("parquet_path", ""))).resolve() != parquet_path:
         raise RuntimeError("advanced research Parquet path metadata mismatch")
-    if _file_sha256(parquet_path) != str(payload.get("parquet_sha256", "")):
+    parquet_sha256 = str(payload.get("parquet_sha256", ""))
+    if _file_sha256(parquet_path) != parquet_sha256:
         raise RuntimeError("advanced research Parquet hash mismatch")
     report = AdvancedResearchReport.model_validate(payload["report"])
     if report.report_id != report_id:
         raise RuntimeError("advanced research report identity mismatch")
-    frame = pd.read_parquet(parquet_path)
-    if len(frame) != report.oof_rows or _frame_hash(frame) != report.oof_sha256:
-        raise RuntimeError("advanced research OOF content identity mismatch")
     if _stable_hash(_report_identity(report)) != report.report_id:
         raise RuntimeError("advanced research report content identity mismatch")
-    return report, frame
+    return parquet_path, report, parquet_sha256
 
 
 def _run_ablations(
@@ -2011,6 +2308,7 @@ def _run_ablations(
     parameters: Mapping[str, int | float],
     config: AdvancedResearchConfig,
     validation_not_before: pd.Timestamp,
+    checkpoint_store: ResearchCheckpointStore | None = None,
 ) -> tuple[FeatureAblationResult, ...]:
     plans = {
         item.family_id: item
@@ -2032,6 +2330,8 @@ def _run_ablations(
         seed=config.seeds[0],
         parameters=parameters,
         config=config,
+        checkpoint_store=checkpoint_store,
+        checkpoint_scope="ablation-F0-selection",
     )
     baseline_selection_metric = evaluate_cross_sectional_predictions(
         dates=baseline_selection_oof["trading_date"],
@@ -2050,6 +2350,8 @@ def _run_ablations(
         parameters=parameters,
         config=config,
         validation_not_before=validation_not_before,
+        checkpoint_store=checkpoint_store,
+        checkpoint_scope="ablation-F0-evaluation",
     )
     baseline_evaluation_metric = evaluate_cross_sectional_predictions(
         dates=baseline_evaluation_oof["trading_date"],
@@ -2101,6 +2403,8 @@ def _run_ablations(
             seed=config.seeds[0],
             parameters=parameters,
             config=config,
+            checkpoint_store=checkpoint_store,
+            checkpoint_scope=f"ablation-{family_id}-selection",
         )
         selection_score = evaluate_cross_sectional_predictions(
             dates=selection_oof["trading_date"],
@@ -2123,6 +2427,8 @@ def _run_ablations(
             parameters=parameters,
             config=config,
             validation_not_before=validation_not_before,
+            checkpoint_store=checkpoint_store,
+            checkpoint_scope=f"ablation-{family_id}-evaluation",
         )
         evaluation_score = evaluate_cross_sectional_predictions(
             dates=evaluation_oof["trading_date"],

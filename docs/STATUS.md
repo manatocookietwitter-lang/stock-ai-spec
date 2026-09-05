@@ -1,6 +1,6 @@
 # Project Status
 
-更新日: 2026-09-04
+更新日: 2026-09-05
 状態: `GOAL3_INDEPENDENT_RESEARCH_RUNNING`
 
 ## Goal 1で実装したもの
@@ -539,3 +539,31 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - 5日regressionのmean daily Rank ICはLightGBM 0.036813、XGBoost 0.039487、CatBoost 0.019956。5日rankingは-0.002873、-0.001487、0.073736
 - 20日regressionのmean daily Rank ICはLightGBM 0.062259、XGBoost 0.064231、CatBoost 0.068081。20日rankingは0.034376、0.020157、0.103577
 - これらはseed 17、`run_ablations=false`、`run_diagnostics=false`のdevelopment-only基準実験であり、Champion選定の十分条件ではない。D073〜D075に従い、次は隔離branchを安全にmainへ統合して研究code / configを固定し、3 seed以上のv2 Feature Ablation campaignへ進む
+
+## 2026-09-04 Goal 3選択固定・単回holdout基盤（隔離ブランチ）
+
+- 実行中のlegacy campaignを変更・停止・再起動せず、次の安全なsource境界で使う実装を隔離branchへ追加した。現行campaign終了まではmainへ取り込まない
+- v2 ablation / final-candidate campaignを全artifact hashまで再認証し、3 seed以上のfeature vote、全3 model family × 1 / 5 / 20日 × 4 taskの完全matrixを要求する
+- purged development OOFだけからhorizon別feature、expected return、rank、downside quantile、large-loss model、全parameter、非負simplex ensemble weight、uncertaintyを選び、content-addressed selectionへ固定する。ensembleは同じmeta-evaluation区間のbest componentを上回った場合だけ採用する
+- 選択後だけ使えるlocked holdout evaluatorを追加した。holdout読込前にselectionと唯一のledger path / evaluator commitを一度だけ結び付け、component単位のtargetなしprediction checkpointからresumeし、完了済みcomponentを再fitしない
+- completed reportはselection / Build / Dataset / evaluator / feature definition / prediction hashを再認証する。選択・holdout結果はappend-only Experiment Registryへidempotentに保存し、task固有metricを欠損時0へ置換しない
+- full JPX OOFのselection再読込は、最初に全bundleのlogical / Parquet / report hashを順次認証し、ensemble整列passでは同じParquet hashを読込前後に確認してregression / rankingの6列だけをpredicate読込する。quantile / large-loss rowの不要な再materializeを避けるが、認証・期間・行は省略しない
+- holdoutの独立runnerとTask Scheduler登録入口を追加した。全development選択固定後の明示登録時だけ単回評価を開始し、Windows再起動後も同じledgerをresumeする。研究workerへAPI keyを渡さず、read-only statusは状態を変更しない
+- fixtureで中断・resume・成功済みcomponent skip・改ざん・alternate root / commit拒否・selection schema不整合を検証した。実データlocked holdoutは未開封で、Champion候補もまだ固定していない
+- 隔離branchの全品質gateはRuff / strict mypy（48 source files）/ Python 229 test / branch coverage 85.33% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がpass。PowerShell 5.1で両holdout runner scriptの構文とTask Scheduler引数表示も検証した
+
+## 2026-09-05 Goal 3 feature固定→candidate実行ブリッジ（隔離ブランチ）
+
+- ablationのtuning-only seed voteを、horizon別exact feature列、F1〜F12 evidence、Build / Dataset / Feature / campaign / report / code / holdout境界とともにcontent-addressed `DevelopmentFeatureSelectionArtifact`へ先に固定する入口を追加した
+- 固定artifactだけから1 / 5 / 20日それぞれのLightGBM / XGBoost / CatBoost × 3 seed以上をv2 campaignとしてrun / resumeし、完了後に全model・parameter・ensemble weight・uncertaintyを固定する二段階CLIを追加した
+- candidate専用の独立runnerとWindows Task Scheduler登録scriptを追加した。Codex終了・Windows再起動後も同じmanifest、fold checkpoint、永続Optuna studyから自動再開し、API keyをworkerへ渡さず、locked holdoutを開かない。run再開時はPIDだけでなくPython process名と開始時刻を照合し、PID再利用を生存workerと誤認しない
+- `research campaign-status` / `candidate-status`はread-onlyで、v2 campaignのhorizon / model / seedに加えactiveまたは最新のtask / foldとcheckpoint件数を返す。status実行前後にcampaign / progress byteが同一であることをfixture testで確認した
+- 独立runnerが実際に使う`python -m stock_ai`入口を追加した。日付切替前後でもGoal 5 E2Eが未来時刻fixtureを作らないよう、APIへaware clock注入口を設け、E2EだけJSTの固定時刻を使用する。production既定は現在JSTのまま、naive clockは拒否する
+- 品質gateはRuff / strict mypy（48 source files）/ Python 234 test / branch coverage 85.29% / frontend ESLint・TypeScript・Vitest 6件・production build / Microsoft Edge E2E 1件がpass。candidate / research / holdout runner全scriptはWindows PowerShell 5.1 parserを通し、candidateの実statusがread-onlyかつcredential非表示であることと、Task Schedulerの全研究config明示引数をWindows上で実行確認した
+- 現行legacy campaignは変更・停止・再起動しておらず、この隔離sourceはその安全な完了境界後までmainへ取り込まない。実データfeature vote、candidate実行、Champion候補固定、locked holdout単回評価はまだ未実行
+
+## 2026-09-05 Goal 3中断再開基盤のmain統合
+
+- legacy base campaignの全9 batch完了と成果物checkpoint `b1d8fef`を安全境界として、`goal3-granular-checkpoints`のfold / Optuna永続checkpoint、feature固定、candidate campaign、development選択固定、単回holdout評価基盤をmainへ統合した
+- 次の実データ処理は3 seed以上のv2 Feature Ablation campaignであり、研究code / feature定義 / seed / bounded Optuna条件を固定して独立runnerへ委譲する。全development選択固定までlocked holdoutを開かない
+- main統合後gateはRuff、strict mypy（48 source files）、Python 234 test、branch coverage 85.29%、frontend ESLint / TypeScript / Vitest 6件 / production build、Microsoft Edge E2E 1件がpass。Task Scheduler設定表示の端末幅依存改行を固定幅出力へ修正し、該当回帰testを含む全suiteで再確認した

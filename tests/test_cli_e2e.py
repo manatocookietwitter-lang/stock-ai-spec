@@ -32,3 +32,19 @@ def test_installed_console_entry_point_loads_without_source_path_fallback() -> N
     )
     assert result.returncode == 0, result.stderr
     assert "never submits orders" in result.stdout
+
+
+def test_module_entry_point_used_by_independent_runners() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    environment.pop("JQUANTS_API_KEY", None)
+    result = subprocess.run(
+        [sys.executable, "-m", "stock_ai", "research", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "candidate-campaigns" in result.stdout

@@ -100,17 +100,31 @@ class ExperimentRegistry:
         self.path = path
 
     def append(self, record: ExperimentRecord) -> None:
+        self._append(record, allow_identical=False)
+
+    def append_idempotent(self, record: ExperimentRecord) -> bool:
+        """Append once, or authenticate and reuse an identical deterministic record."""
+
+        return self._append(record, allow_identical=True)
+
+    def _append(self, record: ExperimentRecord, *, allow_identical: bool) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        encoded_record = record.model_dump(mode="json")
         if self.path.exists():
-            existing_ids = {
-                str(json.loads(line)["experiment_id"])
+            existing_records = {
+                str(value["experiment_id"]): value
                 for line in self.path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
+                for value in (json.loads(line),)
             }
-            if record.experiment_id in existing_ids:
+            existing = existing_records.get(record.experiment_id)
+            if existing is not None:
+                if allow_identical and existing == encoded_record:
+                    return False
                 raise ValueError(f"experiment ID already exists: {record.experiment_id}")
-        payload = json.dumps(record.model_dump(mode="json"), sort_keys=True, allow_nan=False) + "\n"
+        payload = json.dumps(encoded_record, sort_keys=True, allow_nan=False) + "\n"
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        return True

@@ -152,6 +152,17 @@ stock-ai research baseline --dataset-parquet <content-addressed-parquet> --code-
 stock-ai research advanced --build-manifest <production-build-manifest.json> --code-commit <commit>
 ```
 
+長時間の新規research campaignは、既定で`model × horizon × seed` batch、永続Optuna study、
+content-addressed walk-forward fold checkpointを使う。granular checkpoint directoryはcampaign manifestへ固定し、
+次のread-only commandで照会する。
+
+```text
+stock-ai research checkpoint-status --checkpoint-path <content-addressed-checkpoint-directory>
+```
+
+完了済みfold / trialは全identityとhashが一致する場合だけ再利用する。不一致、欠損、改ざん時はfail closedし、
+locked holdoutをdevelopment resumeへ混ぜない。
+
 Free planの既定取得は銘柄master、株価日足、財務summary。Light以上の営業日calendarとTOPIXは`--datasets`で明示する。live取得はprocess環境の`JQUANTS_API_KEY`がない場合に停止し、fixtureへfallbackしない。
 
 株価はexecution参照用raw系列とresearch用調整系列を分け、同じpayloadの再取得は重複させない。訂正値は新versionとして残す。APIが過去訂正時刻を返さないためsource objectは`available_at = received_at`とし、初回取得より前の時点へbackfill値を遡及させない。as-revised単一vintageは研究専用かつ採用不可として明示し、V0/V1/V2/Datasetはsource-frame ID付きのatomic Build Manifestで固定する。詳細は`docs/JQUANTS_V2_RUNBOOK.md`を参照する。
@@ -163,6 +174,57 @@ FeatureSet V2 Extendedと、LightGBM / XGBoost / CatBoostの回帰・Learning to
 uncertainty calibrationを実装した。hyperparameter選択はstrictly earlier tuning期間、model評価は後続outer OOF、
 stacking・uncertainty calibration・reported coverageはさらに3つの時系列区間へ分離する。
 locked final holdoutは開かない。`research advanced`の成果物は常にresearch-onlyで、実注文を生成しない。
+
+Production workflowはablation完了時点でtuning-onlyのfeature voteを先にcontent-addressed
+artifactへ固定する。そのartifactだけを入力にhorizon別final-candidate campaignを実行し、すべて成功した後に
+development OOFから残る全選択を固定する。
+
+```text
+stock-ai research freeze-features \
+  --ablation-campaign <completed-v2-ablation-manifest> \
+  --feature-selection-root artifacts/selections/goal3-features
+stock-ai research candidate-campaigns \
+  --feature-selection <content-addressed-feature-selection.json> \
+  --build-manifest <exact-production-build.json> \
+  --code-commit <exact-candidate-commit>
+stock-ai research finalize-selection \
+  --feature-selection <content-addressed-feature-selection.json> \
+  --candidate-campaign <completed-h1-manifest> \
+  --candidate-campaign <completed-h5-manifest> \
+  --candidate-campaign <completed-h20-manifest>
+```
+
+この段階で1 / 5 / 20日ごとのfeature family、expected-return / rank / downside / large-loss model、
+全hyperparameter、OOF ensemble weight、uncertainty calibrationが固定され、Experiment Registryには
+`locked_holdout_accessed=false`で記録される。不完全campaign、3 seed未満、snapshot / Build / feature / code不一致、
+holdoutを含むreportは拒否する。
+
+長時間のcandidate処理は`runner/candidate-runner.ps1 -Action run`へ委譲でき、同じfeature selectionと
+campaign manifestからhorizon / model / seed / fold / Optuna trial単位で再開する。Windows再起動後の入口は
+`runner/register-candidate-runner-task.ps1`で明示登録する。進捗確認は次のread-only commandを要求時に1回だけ実行する。
+
+```text
+powershell -NoProfile -File runner/candidate-runner.ps1 -Action status \
+  -FeatureSelection <content-addressed-feature-selection.json> \
+  -BuildManifest <exact-production-build.json> \
+  -CodeCommit <exact-candidate-commit>
+```
+
+locked holdoutは固定後の明示的な単回入口だけで評価する。開始前にselection directoryへ一つの評価ledger pathと
+evaluator commitを不可逆に紐付け、model componentごとのprediction-only checkpointから再開する。別rootや別commitでの
+再評価、holdout結果を見た後の再選択・tuning、自動採用は認めない。
+
+```text
+stock-ai research holdout-evaluate \
+  --selection <content-addressed-selection.json> \
+  --build-manifest <exact-production-build.json> \
+  --code-commit <exact-evaluator-commit>
+stock-ai research holdout-status --evaluation-directory <selection-specific-directory>
+```
+
+長時間の単回評価をCodexやshell sessionから独立させる場合は、全development選択の固定を確認してからだけ
+`runner/register-holdout-runner-task.ps1 -Action install`を明示実行する。登録後はWindows再起動時にも同じledgerをresumeし、
+完了済みcomponentを再fitしない。`runner/holdout-runner.ps1 -Action status`はread-onlyである。
 
 ## Goal 4 前場AI研究基盤
 

@@ -1,5 +1,8 @@
-"""Module entry point used by isolated research campaign child processes."""
+"""Module entry point used by independent local runners."""
+
+from __future__ import annotations
 
 from stock_ai.cli import app
 
-app()
+if __name__ == "__main__":
+    app()

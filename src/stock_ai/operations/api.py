@@ -264,8 +264,20 @@ def _today(store: OperationalStore, business_date: date) -> dict[str, object]:
     }
 
 
-def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAPI:
+def create_app(
+    database_path: Path,
+    *,
+    static_dir: Path | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> FastAPI:
     store = OperationalStore(database_path)
+
+    def current_time() -> datetime:
+        value = datetime.now(JST) if clock is None else clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise RuntimeError("operational API clock must be timezone-aware")
+        return value.astimezone(JST)
+
     app = FastAPI(
         title="Stock AI Decision Support",
         version="0.1.0",
@@ -339,7 +351,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
     def status(
         business_date: Annotated[date | None, Query(alias="businessDate")] = None,
     ) -> dict[str, object]:
-        selected = business_date or datetime.now(JST).date()
+        selected = business_date or current_time().date()
         payload = _today(store, selected)
         proposal = _active_proposal(store, selected) if payload["proposal"] is not None else None
         portfolio = store.latest_portfolio()
@@ -366,7 +378,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
     def home(
         business_date: Annotated[date | None, Query(alias="businessDate")] = None,
     ) -> dict[str, object]:
-        selected = business_date or datetime.now(JST).date()
+        selected = business_date or current_time().date()
         portfolio = store.latest_portfolio()
         if portfolio is None:
             return {"portfolio": None, "holdings": [], "blockingReason": "保有未登録"}
@@ -413,7 +425,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
     def today(
         business_date: Annotated[date | None, Query(alias="businessDate")] = None,
     ) -> dict[str, object]:
-        return _today(store, business_date or datetime.now(JST).date())
+        return _today(store, business_date or current_time().date())
 
     @app.get("/api/v1/proposals/{proposal_id}")
     def get_proposal(proposal_id: str) -> dict[str, object]:
@@ -527,7 +539,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
         state = store.apply_unapplied_executions(
             next_as_of=body.next_as_of,
             next_portfolio_id=body.next_portfolio_id,
-            created_at=datetime.now(JST),
+            created_at=current_time(),
         )
         return jsonable_encoder(state, by_alias=True)
 
@@ -539,7 +551,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
         preview = store.preview_execution_csv(
             body.csv_text,
             preview_id=body.preview_id,
-            created_at=datetime.now(JST),
+            created_at=current_time(),
         )
         return jsonable_encoder(preview, by_alias=True)
 
@@ -562,7 +574,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
         preview = store.preview_position_reconciliation_csv(
             body.csv_text,
             preview_id=body.preview_id,
-            created_at=datetime.now(JST),
+            created_at=current_time(),
         )
         return jsonable_encoder(preview, by_alias=True)
 
@@ -576,7 +588,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
             preview_id,
             next_portfolio_id=body.next_portfolio_id,
             confirm_all_differences=body.confirm_all_differences,
-            created_at=datetime.now(JST),
+            created_at=current_time(),
         )
         return jsonable_encoder(state, by_alias=True)
 
@@ -600,7 +612,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
         business_date: Annotated[date | None, Query(alias="businessDate")] = None,
     ) -> dict[str, object]:
         portfolio = store.latest_portfolio()
-        proposal_date = business_date or datetime.now(JST).date()
+        proposal_date = business_date or current_time().date()
         today_proposal = _active_proposal(store, proposal_date)
         positions = (
             []
@@ -659,7 +671,7 @@ def create_app(database_path: Path, *, static_dir: Path | None = None) -> FastAP
     @app.get("/api/v1/settings")
     def settings() -> dict[str, object]:
         portfolio = store.latest_portfolio()
-        proposal = _active_proposal(store, datetime.now(JST).date())
+        proposal = _active_proposal(store, current_time().date())
         policy_snapshot = (
             None
             if proposal is None
