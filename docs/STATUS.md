@@ -590,3 +590,4 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - screenはdevelopment OOFだけで、3-seed / fold方向安定性、5日・20日との非重複性、5日＋20日への増分OOF、realistic costと10〜50 bps stress、turnover / downside / large-loss非悪化を全て要求する。不成立・評価不能なら1日をFinal Candidateから除外する
 - 5日・20日は予定どおり3 model family × 3 seedのfull Feature Ablationを行う。locked holdoutは未開封のまま、正常な長時間計算はrunnerへ委譲し、Codexは継続監視しない
 - 現行のPython campaign親はmanifest内batchを連続実行し、稼働中processへ次batchだけを安全に差し替えるcontrol pointを持たない。D077のruntime切替は現在のseed 17を壊さないbatch境界でのみ行い、それまではsource / manifestを変更しない
+- 現在の`h1-lightgbm-s17`が成功状態をatomic保存した後、旧計画の`h1-lightgbm-s29` workerを起動する直前だけfail closedする一回限りの境界ラッチを、次attempt log pathへdirectoryとして設置した。現worker、親process、manifest、checkpoint、Registryには触れず、次の長時間workerを重複・旧条件で開始しない。次回ユーザー要求時のread-only statusで安全境界を確認してから、1日screen campaignと5日・20日full campaignへrunner入口を切り替える
