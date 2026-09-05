@@ -174,6 +174,7 @@
 - stability reports across folds and seeds
 - no model or feature adopted solely on in-sample score or importance
 - library implementation/version is recorded and numerical regression tests pass
+- 5日・20日は3 seedのfull F1〜F12 ablationを行う。1日はdevelopment-only軽量screenを先行し、事前固定した安定性・非重複性・増分OOF・cost・turnover・downside gateをすべて通過した場合だけfull ablationへ戻す
 
 ## M7 — Multi-horizon and Downside
 
@@ -190,6 +191,7 @@
 - Decision Engine-compatible outputs
 - uncertainty error analysis
 - OOF predictions stored
+- 20日を中期の主alpha、5日を短期補助alpha、screen通過時の1日を売買タイミング・短期リスク補助Challengerとして評価する
 
 ## M8 — Morning AI
 

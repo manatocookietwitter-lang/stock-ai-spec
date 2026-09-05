@@ -744,3 +744,26 @@ read-only表示し、runnerの自動復旧はmanifest変更・worker再起動・
 これにより確認不能を死亡と誤認して同一workerを重複起動しない。PID再利用はprocess名だけで判断せず、開始時刻の
 不一致で明確に拒否する。動作中Ablation campaignのsource provenanceを維持するため、この修正はrunner / test / docsに
 限定し、model source、研究config、seed、feature、artifact、locked holdoutは変更しない。
+
+### D077 — 1日modelはdevelopment軽量screenを通過した場合だけfull研究へ戻す
+
+Goal 3の計算資源は、現時点のdevelopment baselineで相対的に強い5日・20日へ優先配分する。20日は中期の主alpha、
+5日は短期補助alphaとし、1日は売買タイミング・短期リスクの補助Challengerとする。現在実行中の
+`h1-lightgbm-s17`は停止・再起動せず完了させ、そのartifact、checkpoint、Experiment Registryを保持する。
+方針のruntime反映は安全なbatch境界だけで行い、稼働中manifestを書き換えない。
+
+1日のF1〜F12 full Feature Ablationは一旦行わない。既存のseed 17 development reportを再利用し、まずXGBoost / CatBoostの
+seed 29 / 43だけを同一研究境界で追加する。LightGBM seed 17は保存するが、LightGBMの追加seedはscreen前に優先しない。
+5日・20日は当初計画どおりLightGBM / XGBoost / CatBoost × seed 17 / 29 / 43のfull ablationを継続する。
+
+1日をfull ablation / Final Candidateへ戻すには、同一のpurged development OOFだけで次の全gateを満たす必要がある。
+
+1. XGBoostまたはCatBoostの少なくとも一方で、seed 17 / 29 / 43すべての主要OOF方向が正、かつ各seedでouter foldの60%以上が同方向。
+2. 5日・20日の固定OOFそれぞれとの日付内Spearman相関の絶対値が0.95未満で、両者へcross-sectional線形射影した1日予測残差のRank ICが正。
+3. 5日＋20日へ1日を追加した非負・総和1 OOF stackingが、同じ未接触meta-evaluation期間の主要scoreを厳密に改善。
+4. 既存realistic cost控除後のDecision Engine objectiveが厳密に改善し、10 / 20 / 30 / 50 bps stressの全てで増分が非負。
+5. OOS turnover、downside quantile、large-loss rateが5日＋20日構成より悪化しない。
+
+不足値を0や推測値で埋めず、一つでも不成立または評価不能ならscreenは不合格とする。不合格なら1日をFinal Candidateから除外し、
+以後の計算資源を5日・20日に集中する。合格しても1日は主alphaへ自動昇格させず、補助寄与としてのみ評価する。
+この判定は1日の新しい複数seed結果を見る前に固定し、locked holdoutを一切使わない。

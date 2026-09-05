@@ -581,3 +581,12 @@ read-only specialist reviewを5系統（PIT/leakage、quant、portfolio、tax/co
 - statusのcheckpoint読取から不適切なPython PID probeを除去し、確認不能でもread-onlyな`UNKNOWN`を返す。自動復旧も`UNKNOWN`が一件でもあればmanifestやworkerを変更せず終了するため、重複起動しない
 - Windows PowerShell 5.1でWinError 87、AccessDenied、PID不存在、PID再利用、正常一致、およびresearch runner statusの非変更性をfixture検証した。対象7 testはpass
 - 現在のAblation workerは停止・再起動・PID照会していない。`src`、依存lock、研究条件、seed、Ablation設定、成果物、locked holdoutは変更しておらず、研究は独立runnerへ委譲したままとする
+
+## 2026-09-05 Goal 3の1日Challenger軽量screen方針
+
+- D077として、新しい1日複数seed結果を比較する前にscreen条件を固定した。20日を中期の主alpha、5日を短期補助alpha、1日を売買タイミング・短期リスク補助Challengerとして扱う
+- 現在実行中の`h1-lightgbm-s17`は停止・再起動せず、そのまま完了させる。稼働中campaign manifest、checkpoint、Experiment Registry、artifactは変更・削除しない
+- 1日はF1〜F12 full ablationを先行せず、既存seed 17を再利用してXGBoost / CatBoostのseed 29 / 43を追加する軽量screenへ変更する。LightGBM seed 17は保存するが、追加seedを優先しない
+- screenはdevelopment OOFだけで、3-seed / fold方向安定性、5日・20日との非重複性、5日＋20日への増分OOF、realistic costと10〜50 bps stress、turnover / downside / large-loss非悪化を全て要求する。不成立・評価不能なら1日をFinal Candidateから除外する
+- 5日・20日は予定どおり3 model family × 3 seedのfull Feature Ablationを行う。locked holdoutは未開封のまま、正常な長時間計算はrunnerへ委譲し、Codexは継続監視しない
+- 現行のPython campaign親はmanifest内batchを連続実行し、稼働中processへ次batchだけを安全に差し替えるcontrol pointを持たない。D077のruntime切替は現在のseed 17を壊さないbatch境界でのみ行い、それまではsource / manifestを変更しない

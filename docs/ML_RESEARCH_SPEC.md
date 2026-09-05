@@ -184,6 +184,23 @@ Feature Set Manifestには定義hash、前処理版、データ能力、コー�
 - 期間別の独立学習
 - 期間統合はOOF予測だけで学習
 
+現時点のGoal 3では、20日を中期の主alpha、5日を短期補助alphaとし、1日は売買タイミング・短期リスクを補助する
+Challengerとして扱う。1日は最初からF1〜F12 Feature Ablationへ進めず、既存seed 17のdevelopment reportを再利用し、
+XGBoost / CatBoostだけseed 29 / 43を追加する軽量screenを先に行う。LightGBM seed 17は監査可能に保存するが、screen前の
+追加seedを優先しない。
+
+1日Challengerをfull Feature AblationとFinal Candidateへ戻せるのは、locked holdoutを使わない同一development OOF上で
+次をすべて満たした場合だけとする。欠損・未成熟・整列不能な評価はpassへ補完せずfail closedする。
+
+- XGBoostまたはCatBoostの少なくとも一方でseed 17 / 29 / 43すべての主要OOF方向が正で、各seedのouter foldの60%以上が同方向
+- 5日・20日の固定OOF予測それぞれとの日付内Spearman相関の絶対値が0.95未満で、両者へcross-sectional線形射影した残差のRank ICが正
+- 5日＋20日の固定OOF構成へ1日を追加した非負・総和1 stackingが、同じ未接触meta-evaluation期間の主要scoreを厳密に改善
+- 既存のrealistic cost設定で控除後Decision Engine objectiveが厳密に改善し、10 / 20 / 30 / 50 bps stressのいずれでも増分が負にならない
+- OOS turnover、downside quantile、large-loss rateのいずれも5日＋20日構成より悪化しない
+
+一つでも満たさなければ1日はFinal Candidateから除外し、以後の計算資源を5日・20日に集中する。screenを通過した場合も
+1日は原則として主alphaへ昇格させず、追加情報と短期リスク補助としてensemble weightとDecision Engine寄与を評価する。
+
 ### Morning model
 
 - 前日予測を更新する回帰
@@ -407,9 +424,9 @@ rejection reason
 
 ## 7.3 Development選択の固定とlocked holdout単回評価
 
-- feature familyはablation campaignのstrictly-earlier tuning evidenceをseedごとに集約し、3 seed以上のうち3分の2以上が支持したものだけをhorizon別に固定する
+- 5日・20日のfeature familyはablation campaignのstrictly-earlier tuning evidenceをseedごとに集約し、3 seed以上のうち3分の2以上が支持したものだけをhorizon別に固定する。1日は上記の軽量screenを通過した場合だけ同じfull ablationへ進む
 - vote結果はfinal-candidate開始前に、Production Build / Dataset / Feature / code / seed / holdout境界とexact feature列を持つcontent-addressed中間artifactへ固定する
-- final-candidate campaignは固定済みfeature列だけで、LightGBM / XGBoost / CatBoost、1 / 5 / 20日、3 seed以上、regression / ranking / quantile / large-lossを完走する
+- final-candidate campaignは固定済みfeature列だけでLightGBM / XGBoost / CatBoost、5日 / 20日、3 seed以上、regression / ranking / quantile / large-lossを完走する。1日は軽量screen通過時だけ同じmatrixへ追加する
 - model、feature、hyperparameter、ensemble weight、uncertaintyの選択はpurged development OOFだけで完了し、一つのcontent-addressed selection artifactとして保存する
 - 選択artifactはProduction Build、Dataset / Feature snapshot、feature definition、campaign / report / code identity、holdout境界を認証し、`locked_holdout_accessed=false`を固定する
 - locked holdout evaluatorは、選択artifactへ一つのledger path、evaluator commit、Build / Dataset identityをholdout読込前に一度だけ紐付ける
